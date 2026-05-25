@@ -1,0 +1,26 @@
+# Supabase Configuration for School Finance SaaS
+
+project_id = "school-finance-saas"
+
+[api]
+port = 54321
+schemas = ["public"]
+extra_search_path = ["public"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54323
+
+[studio]
+port = 54324
+
+[auth]
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173/**"]
+jwt_expiry = 3600
+enable_signup = true
+
+[storage]
+enabled = true
+port = 54325
