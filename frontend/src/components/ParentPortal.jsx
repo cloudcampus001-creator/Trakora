@@ -122,11 +122,59 @@ export default function ParentPortal({ schoolSlug }) {
   }
 
   async function handleMoMoPayment(type) {
-    const amount = type === 'REGISTRATION' ? feeStructure : tuitionAmountToPay;
-    const targetPhone = type === 'REGISTRATION' ? phone : foundStudent.parent_phone;
-    alert(`Initiating Mobile Money prompt to ${targetPhone} for ${Number(amount).toLocaleString()} XAF...`);
-    // Placeholder for actual payment API call. On success, backend updates DB.
+  const amount = type === 'REGISTRATION' ? feeStructure : tuitionAmountToPay;
+  const targetPhone = type === 'REGISTRATION' ? phone : foundStudent.parent_phone;
+  const targetStudentId = currentAppId || foundStudent.id;
+
+  try {
+    // 1. Instantly inject a successful transaction row into Supabase
+    const { data: txn, error: txError } = await supabase
+      .from('financial_transactions')
+      .insert([{
+        school_id: school.id,
+        student_id: targetStudentId,
+        amount: Number(amount),
+        type: type, // 'REGISTRATION' or 'TUITION'
+        payment_method: 'MTN_MOMO_SIMULATED',
+        status: 'COMPLETED' // Automatically mark as completed for simulation
+      }])
+      .select()
+      .single();
+
+    if (txError) throw txError;
+
+    // 2. Automatically update the student state engine depending on what they paid
+    if (type === 'REGISTRATION') {
+      const { error: regError } = await supabase
+        .from('students')
+        .update({
+          application_status: 'COMPLETED',
+          is_registered: true
+        })
+        .eq('id', targetStudentId);
+
+      if (regError) throw regError;
+      alert("✨ [SIMULATION] Mobile Money Payment Successful! Your registration is complete.");
+      
+    } else if (type === 'TUITION') {
+      // Fetch current balance to calculate new balance safely
+      const currentPaid = Number(foundStudent.tuition_paid || 0);
+      const newTotalPaid = currentPaid + Number(amount);
+
+      const { error: tuiError } = await supabase
+        .from('students')
+        .update({ tuition_paid: newTotalPaid })
+        .eq('id', targetStudentId);
+
+      if (tuiError) throw tuiError;
+      alert(`✨ [SIMULATION] XAF ${amount} Tuition Payment Successfully credited to student ledger.`);
+    }
+
+  } catch (error) {
+    console.error("Simulation engine failed:", error.message);
+    alert("Simulation Error: Could not write tracking values to your database.");
   }
+}
 
   if (!school) return <div className="min-h-screen flex items-center justify-center font-bold text-slate-500">Connecting to Institution...</div>;
 
