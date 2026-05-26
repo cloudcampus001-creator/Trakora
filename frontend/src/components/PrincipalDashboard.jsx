@@ -63,10 +63,23 @@ export default function PrincipalDashboard({ userProfile }) {
 
   async function handleCreateBursar(e) {
     e.preventDefault();
-    const { data, error } = await supabase.auth.signUp({ email: bEmail, password: bPassword });
+    
+    // Pass the payload directly into options.data so the SQL trigger processes it correctly
+    const { data, error } = await supabase.auth.signUp({ 
+      email: bEmail.trim(), 
+      password: bPassword,
+      options: {
+        data: {
+          role: 'bursar',
+          school_id: userProfile.school_id,
+          full_name: bName.trim()
+        }
+      }
+    });
+
     if (error) return alert(error.message);
-    await supabase.from('profiles').insert([{ id: data.user.id, school_id: userProfile.school_id, role: 'bursar', full_name: bName }]);
-    alert('Bursar account created!');
+
+    alert('Bursar node account deployed and active!');
     setBName(''); setBEmail(''); setBPassword('');
   }
 

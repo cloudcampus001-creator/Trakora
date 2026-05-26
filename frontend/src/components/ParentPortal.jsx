@@ -3,178 +3,292 @@ import { supabase } from '../lib/supabase';
 
 export default function ParentPortal({ schoolSlug }) {
   const [school, setSchool] = useState(null);
-  const [config, setConfig] = useState(null);
   const [classes, setClasses] = useState([]);
   
-  // Roster Workflow Logic states
-  const [step, setStep] = useState('LOOKUP'); // LOOKUP, CHOOSE_ACTION, PAYMENT_PROCESSING
-  const [matricule, setMatricule] = useState('');
-  const [studentFound, setStudentFound] = useState(null);
+  // PORTAL ROUTING STATE
+  const [portalMode, setPortalMode] = useState('SELECTION'); // 'SELECTION', 'REGISTER', 'TUITION'
+
+  // --- REGISTRATION STATE ---
+  const [currentAppId, setCurrentAppId] = useState(localStorage.getItem('edu_app_id') || null);
+  const [appStatus, setAppStatus] = useState(null);
+  const [feeStructure, setFeeStructure] = useState(0);
   
-  // Registration data structure states
   const [fullName, setFullName] = useState('');
-  const [selectedClassId, setSelectedClassId] = useState('');
-  const [parentPhone, setParentPhone] = useState('');
-  const [paymentType, setPaymentType] = useState(null); // REGISTRATION, TUITION
-  const [paymentAmount, setPaymentAmount] = useState(0);
+  const [classId, setClassId] = useState('');
+  const [gender, setGender] = useState('');
+  const [dob, setDob] = useState('');
+  const [pob, setPob] = useState('');
+  const [phone, setPhone] = useState('');
 
-  useEffect(() => { loadInitialData(); }, []);
+  // --- TUITION PAYMENT STATE ---
+  const [searchMatricule, setSearchMatricule] = useState('');
+  const [foundStudent, setFoundStudent] = useState(null);
+  const [tuitionAmountToPay, setTuitionAmountToPay] = useState('');
 
-  async function loadInitialData() {
-    const { data: s } = await supabase.from('schools').select('*').eq('slug', schoolSlug).single();
-    setSchool(s);
-    const { data: c } = await supabase.from('school_configs').select('*').eq('school_id', s.id).single();
-    setConfig(c);
-    const { data: cl } = await supabase.from('classes').select('*').eq('school_id', s.id);
-    setClasses(cl || []);
-  }
+  // Load initial school structure
+  useEffect(() => {
+    loadSchoolData();
+  }, [schoolSlug]);
 
-  async function handleStudentLookup(e) {
-    e.preventDefault();
-    const { data, error } = await supabase
-      .from('students')
-      .select('*, classes(*)')
-      .eq('matricule', matricule.toUpperCase().trim())
-      .single();
+  // Real-time listener for Registration Approvals
+  useEffect(() => {
+    if (!currentAppId) return;
+    checkApplicationStatus();
 
-    if (data) {
-      setStudentFound(data);
-      setStep('CHOOSE_ACTION');
-    } else {
-      // Direct state branch prompt to execute new registration creation row setup
-      setStep('NEW_REGISTRATION_FORM');
+    const statusChannel = supabase
+      .channel(`live_status_${currentAppId}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students', filter: `id=eq.${currentAppId}` }, () => {
+          checkApplicationStatus();
+      }).subscribe();
+
+    return () => supabase.removeChannel(statusChannel);
+  }, [currentAppId]);
+
+  async function loadSchoolData() {
+    const { data: schoolData } = await supabase.from('schools').select('*').eq('slug', schoolSlug).single();
+    if (schoolData) {
+      setSchool(schoolData);
+      const { data: classData } = await supabase.from('classes').select('*').eq('school_id', schoolData.id);
+      setClasses(classData || []);
     }
   }
 
-  async function executeNewStudentCreation(e) {
+  // --- REGISTRATION LOGIC ---
+
+  async function checkApplicationStatus() {
+    if (!currentAppId) return;
+    const { data: studentData } = await supabase.from('students').select('*, classes(*)').eq('id', currentAppId).single();
+
+    if (studentData) {
+      setAppStatus(studentData.application_status);
+      if (studentData.application_status === 'APPROVED') {
+        const { data: configData } = await supabase.from('school_configs').select('*').eq('school_id', studentData.school_id).single();
+        if (configData) {
+          const absoluteFee = configData.fee_structure === 'UNIFORM' 
+            ? Number(configData.uniform_registration_fee || 0)
+            : Number(studentData.classes?.segmented_registration_fee || 0);
+          setFeeStructure(absoluteFee);
+        }
+      }
+    } else {
+      localStorage.removeItem('edu_app_id');
+      setCurrentAppId(null);
+    }
+  }
+
+  async function handleSubmitRegistration(e) {
     e.preventDefault();
-    const cleanMatricule = matricule.toUpperCase().trim();
+    const tempMatricule = `REQ-${Date.now().toString().slice(-6)}`;
+
     const { data, error } = await supabase.from('students').insert([{
       school_id: school.id,
-      class_id: selectedClassId,
-      matricule: cleanMatricule,
+      class_id: classId,
       full_name: fullName,
-      parent_phone: parentPhone,
-      is_registered: false
+      gender: gender,
+      date_of_birth: dob,
+      place_of_birth: pob,
+      matricule: tempMatricule,
+      parent_phone: phone,
+      application_status: 'PENDING_REVIEW'
     }]).select().single();
 
-    if (error) return alert(error.message);
-    setStudentFound(data);
-    
-    // Determine exact target structure fee price parameters
-    const targetClass = classes.find(c => c.id === selectedClassId);
-    const feeToCharge = config.fee_structure === 'UNIFORM' 
-      ? config.uniform_registration_fee 
-      : targetClass.segmented_registration_fee;
+    if (error) return alert("Submission error: " + error.message);
 
-    setPaymentType('REGISTRATION');
-    setPaymentAmount(feeToCharge);
-    setStep('PAYMENT_PROCESSING');
+    localStorage.setItem('edu_app_id', data.id);
+    setCurrentAppId(data.id);
+    setAppStatus('PENDING_REVIEW');
   }
 
-  async function handleInitiateMoMoPayment(e) {
+  // --- TUITION LOGIC ---
+
+  async function handleFindStudentForTuition(e) {
     e.preventDefault();
-    // 1. Create Transaction Ledger entry with a PENDING state trigger
-    const { data: tx, error } = await supabase.from('financial_transactions').insert([{
-      school_id: school.id,
-      student_id: studentFound.id,
-      amount: paymentAmount,
-      type: paymentType,
-      status: 'PENDING'
-    }]).select().single();
+    const { data, error } = await supabase
+      .from('students')
+      .select('*, classes(name)')
+      .eq('school_id', school.id)
+      .eq('matricule', searchMatricule)
+      .single();
 
-    if (error) return alert(error.message);
-
-    // 2. Trigger USSD Intercept push via proxy server logic pipeline
-    alert(`USSD PIN Authorization Push Triggered for ${parentPhone}. Provide confirmation and wait for receipt print broadcast confirmation.`);
+    if (data) {
+      if (data.application_status !== 'COMPLETED') {
+        alert("This student's registration is not yet finalized. Please complete registration first.");
+        return;
+      }
+      setFoundStudent(data);
+    } else {
+      alert('Invalid Matricule. Please check your receipt and try again.');
+    }
   }
 
-  if (!school) return <div className="text-center p-12 font-bold text-slate-500">Connecting Infrastructure Ledger Nodes...</div>;
+  async function handleMoMoPayment(type) {
+    const amount = type === 'REGISTRATION' ? feeStructure : tuitionAmountToPay;
+    const targetPhone = type === 'REGISTRATION' ? phone : foundStudent.parent_phone;
+    alert(`Initiating Mobile Money prompt to ${targetPhone} for ${Number(amount).toLocaleString()} XAF...`);
+    // Placeholder for actual payment API call. On success, backend updates DB.
+  }
+
+  if (!school) return <div className="min-h-screen flex items-center justify-center font-bold text-slate-500">Connecting to Institution...</div>;
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <div className="bg-white p-8 rounded-2xl shadow-xl border w-full max-w-md">
-        <h1 className="text-xl font-black text-center text-slate-800 mb-1">{school.name}</h1>
-        <p className="text-xs text-center text-slate-400 tracking-wider uppercase mb-6">Secured Financial Gateway</p>
-
-        {step === 'LOOKUP' && (
-          <form onSubmit={handleStudentLookup} className="space-y-4">
-            <p className="text-sm text-slate-600">Enter the assigned Student Matricule Number to confirm payment records:</p>
-            <input className="border-2 border-slate-200 p-3 w-full rounded-xl text-center font-mono font-bold tracking-widest text-lg focus:border-indigo-600 outline-none transition" placeholder="e.g. CBS-2026-0012" value={matricule} onChange={e=>setMatricule(e.target.value)} required />
-            <button type="submit" className="w-full bg-slate-900 text-white p-3 rounded-xl font-bold tracking-wide hover:bg-slate-800 transition">Validate Matricule</button>
-          </form>
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md w-full relative">
+        
+        {/* Navigation Header */}
+        {portalMode !== 'SELECTION' && !currentAppId && (
+          <button onClick={() => setPortalMode('SELECTION')} className="absolute top-6 left-6 text-sm font-bold text-slate-400 hover:text-slate-800">
+            ← Back
+          </button>
         )}
 
-        {step === 'CHOOSE_ACTION' && studentFound && (
+        <div className="text-center mb-8 border-b pb-6 mt-4">
+          <h1 className="text-2xl font-black text-slate-900 uppercase">{school.name}</h1>
+          <p className="text-slate-500 font-medium">Official Admissions & Finance Portal</p>
+        </div>
+
+        {/* ==========================================
+            VIEW 1: GATEWAY SELECTION
+            ========================================== */}
+        {portalMode === 'SELECTION' && !currentAppId && (
           <div className="space-y-4">
-            <div className="bg-slate-50 p-4 rounded-xl border">
-              <p className="text-xs font-bold text-slate-400 uppercase">Validated Roster Node</p>
-              <h2 className="text-base font-black text-slate-800">{studentFound.full_name}</h2>
-              <p className="text-xs text-slate-600">Class: {studentFound.classes?.name}</p>
-            </div>
+            <button 
+              onClick={() => setPortalMode('REGISTER')}
+              className="w-full bg-slate-900 text-white p-6 rounded-xl text-left hover:bg-slate-800 transition group border border-slate-900">
+              <h2 className="text-xl font-black mb-1 group-hover:translate-x-1 transition-transform">New Registration</h2>
+              <p className="text-sm text-slate-400">Apply for admission and pay initial registration fees.</p>
+            </button>
             
-            {!studentFound.is_registered ? (
-              <div className="bg-rose-50 border border-rose-200 p-3 rounded-xl text-xs text-rose-800 font-medium">
-                Our database indicates structural registration fees have not been recorded for this student node. Complete this core allocation requirement before tuition tracking blocks are unlocked.
+            <button 
+              onClick={() => setPortalMode('TUITION')}
+              className="w-full bg-white text-slate-900 p-6 rounded-xl text-left hover:bg-slate-50 transition border-2 border-slate-200 group">
+              <h2 className="text-xl font-black mb-1 text-emerald-700 group-hover:translate-x-1 transition-transform">Pay Tuition Fees</h2>
+              <p className="text-sm text-slate-500">Requires student matricule from your registration receipt.</p>
+            </button>
+          </div>
+        )}
+
+        {/* ==========================================
+            VIEW 2: REGISTRATION PIPELINE
+            ========================================== */}
+        {portalMode === 'REGISTER' && (
+          <>
+            {!currentAppId && (
+              <form onSubmit={handleSubmitRegistration} className="space-y-4">
+                <h2 className="font-bold text-emerald-700 mb-2 uppercase text-xs tracking-wider">1. Academic Info</h2>
+                <input className="border p-3 w-full rounded-lg" placeholder="Student Full Name" value={fullName} onChange={e=>setFullName(e.target.value)} required />
+                <select className="border p-3 w-full rounded-lg" value={classId} onChange={e=>setClassId(e.target.value)} required>
+                  <option value="" disabled>Select Desired Class</option>
+                  {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                
+                <h2 className="font-bold text-emerald-700 mt-4 mb-2 uppercase text-xs tracking-wider">2. Demographics</h2>
+                <div className="grid grid-cols-2 gap-3">
+                  <select className="border p-3 w-full rounded-lg" value={gender} onChange={e=>setGender(e.target.value)} required>
+                    <option value="" disabled>Gender</option>
+                    <option value="MALE">Male</option>
+                    <option value="FEMALE">Female</option>
+                  </select>
+                  <input className="border p-3 w-full rounded-lg text-slate-500" type="date" value={dob} onChange={e=>setDob(e.target.value)} required />
+                </div>
+                <input className="border p-3 w-full rounded-lg" placeholder="Place of Birth" value={pob} onChange={e=>setPob(e.target.value)} required />
+
+                <h2 className="font-bold text-emerald-700 mt-4 mb-2 uppercase text-xs tracking-wider">3. Guardian Protocol</h2>
+                <input className="border p-3 w-full rounded-lg" placeholder="Parent Mobile Money Number" type="tel" value={phone} onChange={e=>setPhone(e.target.value)} required />
+
+                <button className="w-full bg-slate-900 text-white p-3 rounded-lg font-bold mt-4 hover:bg-slate-800 transition shadow">
+                  Submit Application
+                </button>
+              </form>
+            )}
+
+            {/* Application States */}
+            {appStatus === 'PENDING_REVIEW' && (
+              <div className="text-center py-8 space-y-4">
+                <div className="w-16 h-16 border-4 border-amber-500 border-t-transparent rounded-full animate-spin mx-auto"></div>
+                <h2 className="text-xl font-bold text-slate-800">Application Under Review</h2>
+                <p className="text-slate-500 text-sm">The Bursar is currently verifying your details. **Do not refresh.**</p>
               </div>
-            ) : null}
+            )}
 
-            <div className="space-y-2">
-              <button disabled={studentFound.is_registered} onClick={() => {
-                const targetFee = config.fee_structure === 'UNIFORM' ? config.uniform_registration_fee : studentFound.classes.segmented_registration_fee;
-                setPaymentType('REGISTRATION'); setPaymentAmount(targetFee); setParentPhone(studentFound.parent_phone); setStep('PAYMENT_PROCESSING');
-              }} className="w-full p-3 rounded-xl font-bold border-2 text-sm transition text-left flex justify-between items-center border-emerald-500 bg-emerald-50 text-emerald-900 disabled:opacity-40">
-                <span>Pay Core Registration</span>
-                <span className="font-black">{config.fee_structure === 'UNIFORM' ? config.uniform_registration_fee : studentFound.classes?.segmented_registration_fee} XAF</span>
-              </button>
+            {appStatus === 'APPROVED' && (
+              <div className="text-center py-4 space-y-4">
+                <div className="bg-emerald-100 text-emerald-800 p-4 rounded-lg mb-6"><h2 className="text-lg font-black">Application Approved!</h2></div>
+                <div className="bg-slate-50 p-4 rounded-lg border text-left mb-6">
+                  <p className="text-xs text-slate-500 font-bold uppercase">Required Registration Fee</p>
+                  <p className="text-3xl font-black text-slate-900">{feeStructure.toLocaleString()} <span className="text-lg">XAF</span></p>
+                </div>
+                <button onClick={() => handleMoMoPayment('REGISTRATION')} className="w-full bg-emerald-600 text-white p-4 rounded-lg font-black text-lg hover:bg-emerald-700 transition shadow-lg">
+                  Pay Registration via MoMo
+                </button>
+              </div>
+            )}
 
-              <button disabled={!studentFound.is_registered} onClick={() => {
-                setPaymentType('TUITION'); setParentPhone(studentFound.parent_phone); setStep('TUITION_AMOUNT_FORM');
-              }} className="w-full p-3 rounded-xl font-bold border-2 text-sm transition text-left flex justify-between items-center border-indigo-500 bg-indigo-50 text-indigo-900 disabled:opacity-40">
-                <span>Execute Tuition Term Installments</span>
-                <span className="text-xs font-black bg-indigo-200 px-2 py-0.5 rounded text-indigo-800">Available Track</span>
-              </button>
-            </div>
+            {appStatus === 'REJECTED' && (
+              <div className="text-center py-8">
+                <h2 className="text-xl font-bold text-rose-600 mb-2">Application Declined</h2>
+                <button onClick={() => {localStorage.removeItem('edu_app_id'); setCurrentAppId(null);}} className="mt-6 bg-slate-200 text-slate-700 px-4 py-2 rounded font-bold">Start New Application</button>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ==========================================
+            VIEW 3: TUITION PAYMENT PIPELINE
+            ========================================== */}
+        {portalMode === 'TUITION' && (
+          <div className="space-y-6">
+            {!foundStudent ? (
+              <form onSubmit={handleFindStudentForTuition} className="space-y-4">
+                <p className="text-slate-600 text-sm mb-4">Enter the official matricule assigned to the student to retrieve their financial ledger.</p>
+                <input 
+                  className="border-2 border-slate-200 p-4 w-full rounded-xl text-center font-mono text-lg font-bold tracking-widest uppercase text-slate-900" 
+                  placeholder="e.g. MAT-2026-001" 
+                  value={searchMatricule} 
+                  onChange={e=>setSearchMatricule(e.target.value)} 
+                  required 
+                />
+                <button className="w-full bg-slate-900 text-white p-3 rounded-xl font-bold hover:bg-slate-800 transition">
+                  Locate Student
+                </button>
+              </form>
+            ) : (
+              <div className="space-y-6 animate-fadeIn">
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xl">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">Identity Verified</p>
+                  <p className="text-xl font-black text-slate-900">{foundStudent.full_name}</p>
+                  <div className="flex justify-between mt-2 text-sm">
+                    <span className="text-slate-600 font-medium">Class: {foundStudent.classes?.name}</span>
+                    <span className="text-slate-600 font-medium">Paid to Date: <span className="font-bold text-emerald-600">{Number(foundStudent.tuition_paid || 0).toLocaleString()} XAF</span></span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="text-xs font-bold text-slate-500 uppercase tracking-wider block mb-2">Tuition Amount to Pay (XAF)</label>
+                  <input 
+                    type="number" 
+                    className="border p-4 w-full rounded-xl text-xl font-black text-slate-900 text-center" 
+                    placeholder="Enter Amount" 
+                    value={tuitionAmountToPay} 
+                    onChange={e=>setTuitionAmountToPay(e.target.value)} 
+                    required 
+                  />
+                </div>
+
+                <button 
+                  onClick={() => handleMoMoPayment('TUITION')} 
+                  disabled={!tuitionAmountToPay || tuitionAmountToPay <= 0}
+                  className="w-full bg-emerald-600 disabled:bg-slate-300 text-white p-4 rounded-xl font-black text-lg hover:bg-emerald-700 transition shadow-lg">
+                  Execute Digital Payment
+                </button>
+                
+                <button onClick={() => setFoundStudent(null)} className="w-full text-sm font-bold text-slate-400 hover:text-slate-600">
+                  Cancel & Search Again
+                </button>
+              </div>
+            )}
           </div>
         )}
 
-        {step === 'NEW_REGISTRATION_FORM' && (
-          <form onSubmit={executeNewStudentCreation} className="space-y-3">
-            <div className="bg-amber-50 text-amber-900 text-xs p-3 rounded-xl border border-amber-200 font-medium">
-              Matricule assignment record not found. Input configuration data blocks below to initialize registration mapping.
-            </div>
-            <input className="border p-2.5 w-full rounded-xl" placeholder="Full Student Name" value={fullName} onChange={e=>setFullName(e.target.value)} required />
-            <select className="border p-2.5 w-full rounded-xl" value={selectedClassId} onChange={e=>setSelectedClassId(e.target.value)} required>
-              <option value="">Select Target Class Assignment...</option>
-              {classes.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-            <input className="border p-2.5 w-full rounded-xl" placeholder="Parent Mobile Money Number" value={parentPhone} onChange={e=>setParentPhone(e.target.value)} required />
-            <button type="submit" className="w-full bg-slate-900 text-white p-3 rounded-xl font-bold">Register Student</button>
-          </form>
-        )}
-
-        {step === 'TUITION_AMOUNT_FORM' && (
-          <div className="space-y-3">
-            <p className="text-sm font-bold text-slate-700">Enter Tuition Installment Target Value (XAF):</p>
-            <input type="number" className="border-2 p-3 w-full rounded-xl text-xl font-bold text-center" value={paymentAmount} onChange={e=>setPaymentAmount(e.target.value)} />
-            <button onClick={() => setStep('PAYMENT_PROCESSING')} className="w-full bg-indigo-600 text-white p-3 rounded-xl font-bold">Proceed to Verification</button>
-          </div>
-        )}
-
-        {step === 'PAYMENT_PROCESSING' && (
-          <form onSubmit={handleInitiateMoMoPayment} className="space-y-4">
-            <div className="bg-slate-50 p-4 rounded-xl border text-center">
-              <span className="text-xs uppercase tracking-wider font-bold text-slate-400">Total Settlement Required</span>
-              <p className="text-3xl font-black text-slate-900 mt-1">{Number(paymentAmount).toLocaleString()} XAF</p>
-              <p className="text-xs text-indigo-600 font-bold mt-1 uppercase tracking-wider">Allocation Target: {paymentType}</p>
-            </div>
-            <div>
-              <label className="text-xs font-bold text-slate-500 block mb-1">Payer Network Source Wallet Number</label>
-              <input className="border p-3 w-full rounded-xl text-center font-bold text-lg" value={parentPhone} onChange={e=>setParentPhone(e.target.value)} required />
-            </div>
-            <button type="submit" className="w-full bg-emerald-600 text-white p-3 rounded-xl font-black tracking-wide text-base hover:bg-emerald-700 transition">Authorize MoMo PIN Push</button>
-          </form>
-        )}
       </div>
     </div>
   );

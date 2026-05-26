@@ -88,3 +88,22 @@
     padding: 10px;
   }
 }
+
+@layer base {
+
+  body {
+    @apply text-slate-900;
+  }
+  /* Forces all typed text to be dark, legible, and slightly bold */
+  input, 
+  select, 
+  textarea {
+    @apply text-slate-900 font-medium bg-white;
+  }
+
+  /* Keeps the placeholder text light grey so it doesn't look like typed text */
+  input::placeholder, 
+  textarea::placeholder {
+    @apply text-slate-400 font-normal;
+  }
+}

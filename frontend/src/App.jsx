@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from './lib/supabase';
 import SuperAdminDashboard from './components/SuperAdminDashboard';
 import PrincipalDashboard from './components/PrincipalDashboard';
-import BursarLogs from './components/BursarLogs';
+import BursarDashboard from './components/BursarDashboard'; // <--- Update this import
 import ParentPortal from './components/ParentPortal';
 
 export default function App() {
@@ -60,7 +60,7 @@ export default function App() {
 
   if (!profile) return <div className="p-12 text-center text-slate-500 font-bold">Parsing Authorization Profile Structure...</div>;
 
-  return (
+return (
     <div className="min-h-screen bg-slate-50">
       <nav className="bg-white border-b p-4 flex justify-between items-center shadow-sm">
         <span className="font-black text-slate-900 text-lg tracking-tight">EDU-LEDGER CORE</span>
@@ -72,7 +72,7 @@ export default function App() {
 
       {profile.role === 'super_admin' && <SuperAdminDashboard />}
       {profile.role === 'principal' && <PrincipalDashboard userProfile={profile} />}
-      {profile.role === 'bursar' && <BursarLogs userProfile={profile} />}
+      {profile.role === 'bursar' && <BursarDashboard userProfile={profile} />} {/* <--- Update this component name */}
     </div>
   );
 }

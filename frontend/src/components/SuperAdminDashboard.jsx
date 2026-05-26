@@ -23,17 +23,22 @@ export default function SuperAdminDashboard() {
       .from('schools').insert([{ name, slug }]).select().single();
     if (sErr) return alert(sErr.message);
 
-    // 2. Provision Auth Core Node for Principal
+    // 2. Provision Auth Node AND pass metadata to the database trigger
     const { data: authData, error: aErr } = await supabase.auth.signUp({
-      email: pEmail, password: pPassword
+      email: pEmail, 
+      password: pPassword,
+      options: {
+        data: {
+          role: 'principal',
+          school_id: newSchool.id,
+          full_name: pName
+        }
+      }
     });
+    
     if (aErr) return alert(aErr.message);
-
-    // 3. Link metadata profile mapping with administrative permissions
-    const { error: pErr } = await supabase.from('profiles').insert([{
-      id: authData.user.id, school_id: newSchool.id, role: 'principal', full_name: pName
-    }]);
-    if (pErr) return alert(pErr.message);
+    
+    // (Note: Step 3 is no longer needed in React because the SQL trigger handles it automatically!)
 
     // 4. Instantiate Configuration Default Record Space
     await supabase.from('school_configs').insert([{ school_id: newSchool.id }]);
