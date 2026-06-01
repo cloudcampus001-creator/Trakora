@@ -4,11 +4,13 @@ import { jsPDF } from 'jspdf';
 import 'jspdf-autotable';
 import QRCode from 'qrcode';
 import { toast } from 'react-hot-toast';
+import { Download, Trash2, X, FileText, QrCode } from 'lucide-react';
 
 export default function PrincipalDashboard({ userProfile }) {
   const [config, setConfig] = useState(null);
   const [classes, setClasses] = useState([]);
   const [students, setStudents] = useState([]);
+  const [transactions, setTransactions] = useState([]); // Needed for Revenue PDF
   const [analytics, setAnalytics] = useState({ revenue: 0, count: 0, pending: 0 });
   const [qrUrl, setQrUrl] = useState('');
   
@@ -18,6 +20,10 @@ export default function PrincipalDashboard({ userProfile }) {
   const [bName, setBName] = useState('');
   const [bEmail, setBEmail] = useState('');
   const [bPassword, setBPassword] = useState('');
+
+  // --- IPHONE GLASSMORPHISM POPUP STATE ---
+  const [popupConfig, setPopupConfig] = useState(null);
+  const [popupPos, setPopupPos] = useState({ x: 0, y: 0, isMobile: false });
 
   useEffect(() => {
     loadConfigurations();
@@ -38,9 +44,16 @@ export default function PrincipalDashboard({ userProfile }) {
 
   async function loadStudentsAndAnalytics() {
     const { data: stdData } = await supabase.from('students').select('*, classes(*)').eq('school_id', userProfile.school_id);
-    const { data: txData } = await supabase.from('financial_transactions').select('amount').eq('school_id', userProfile.school_id).eq('status', 'COMPLETED');
+    
+    // Upgraded to fetch full transaction details for the PDF generator
+    const { data: txData } = await supabase.from('financial_transactions')
+      .select('*, students(full_name)')
+      .eq('school_id', userProfile.school_id)
+      .eq('status', 'COMPLETED')
+      .order('created_at', { ascending: false });
     
     setStudents(stdData || []);
+    setTransactions(txData || []);
 
     const totalRev = txData ? txData.reduce((acc, curr) => acc + Number(curr.amount), 0) : 0;
     const registeredCount = stdData ? stdData.filter(s => s.is_registered).length : 0;
@@ -58,74 +71,189 @@ export default function PrincipalDashboard({ userProfile }) {
     }
   }
 
+  // --- POPUP & PDF ACTIONS ---
+
+  const handleOpenPopup = (e, type, payload = null) => {
+    e.stopPropagation();
+    const isMobile = window.innerWidth < 768;
+    let x = isMobile ? '50%' : e.clientX;
+    let y = isMobile ? '50%' : e.clientY;
+    
+    if (!isMobile) {
+        // Prevent popup from bleeding off the right or bottom edges of the screen
+        if (x > window.innerWidth - 350) x -= 350;
+        else x += 20; 
+        
+        if (y > window.innerHeight - 400) y -= 400;
+        else y += 20;
+    }
+
+    setPopupPos({ x, y, isMobile });
+    setPopupConfig({ type, payload });
+  };
+
+  const closePopup = () => setPopupConfig(null);
+
+  function downloadQRPDF() {
+    const doc = new jsPDF();
+    doc.text(`Official Registration Gateway QR`, 14, 20);
+    doc.text(`Institution: ${config?.name || 'AuraLedger Hub'}`, 14, 28);
+    doc.addImage(qrUrl, 'PNG', 15, 35, 150, 150);
+    doc.save('Gateway_QR_Code.pdf');
+    toast.success('High-Resolution QR PDF generated.');
+    closePopup();
+  }
+
+  function downloadRevenuePDF() {
+    const doc = new jsPDF();
+    doc.text(`Master Revenue Audit Log`, 14, 15);
+    doc.setFontSize(10);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 22);
+    
+    const rows = transactions.map(tx => [
+      tx.students?.full_name || 'System Auto',
+      new Date(tx.created_at).toLocaleDateString(),
+      tx.type,
+      tx.payment_method.replace('_SIMULATED', ''),
+      `${Number(tx.amount).toLocaleString()} XAF`
+    ]);
+
+    doc.autoTable({
+      head: [['Student Identity', 'Date', 'Type', 'Method', 'Value Settled']],
+      body: rows,
+      startY: 28,
+      theme: 'grid',
+      headStyles: { fillColor: [15, 23, 42] },
+      foot: [['', '', '', 'GROSS TOTAL', `${analytics.revenue.toLocaleString()} XAF`]],
+      footStyles: { fillColor: [16, 185, 129], textColor: [255, 255, 255] }
+    });
+
+    doc.save('Revenue_Audit_Log.pdf');
+    toast.success('Audit Log PDF generated.');
+    closePopup();
+  }
+
+  async function handleDeleteStudent(studentId) {
+    const toastId = toast.loading('Purging student record...');
+    const { error } = await supabase.from('students').delete().eq('id', studentId);
+    
+    if (error) {
+      toast.error("Failed to delete record: " + error.message, { id: toastId });
+    } else {
+      toast.success("Application permanently removed.", { id: toastId });
+      loadStudentsAndAnalytics(); // Refresh table and Bursar queue
+      closePopup();
+    }
+  }
+
+  // --- STANDARD CONFIG ACTIONS ---
+
   async function updateConfig(updates) {
     const toastId = toast.loading('Saving configuration...');
     const { error } = await supabase.from('school_configs').update(updates).eq('school_id', userProfile.school_id);
-    if (error) {
-        toast.error('Failed to update config.', { id: toastId });
-    } else {
-        toast.success('Configuration Saved.', { id: toastId });
-        loadConfigurations();
-    }
+    if (error) toast.error('Failed to update config.', { id: toastId });
+    else { toast.success('Configuration Saved.', { id: toastId }); loadConfigurations(); }
   }
 
   async function handleAddClass(e) {
     e.preventDefault();
     const toastId = toast.loading('Adding class segment...');
-    const { error } = await supabase.from('classes').insert([{
-      school_id: userProfile.school_id, name: className, segmented_registration_fee: regFee, segmented_tuition_fee: tuiFee
-    }]);
-    
-    if(error) {
-        toast.error(error.message, { id: toastId });
-    } else {
-        toast.success('Class added successfully.', { id: toastId });
-        setClassName(''); setRegFee(0); setTuiFee(0);
-        loadClasses();
-    }
+    const { error } = await supabase.from('classes').insert([{ school_id: userProfile.school_id, name: className, segmented_registration_fee: regFee, segmented_tuition_fee: tuiFee }]);
+    if(error) toast.error(error.message, { id: toastId });
+    else { toast.success('Class added successfully.', { id: toastId }); setClassName(''); setRegFee(0); setTuiFee(0); loadClasses(); }
   }
 
   async function handleCreateBursar(e) {
     e.preventDefault();
     const toastId = toast.loading('Deploying Bursar access...');
-    
-    const { error } = await supabase.auth.signUp({ 
-      email: bEmail.trim(), 
-      password: bPassword,
-      options: { data: { role: 'bursar', school_id: userProfile.school_id, full_name: bName.trim() } }
-    });
-
-    if (error) {
-        toast.error(error.message, { id: toastId });
-    } else {
-        toast.success('Bursar node account active!', { id: toastId });
-        setBName(''); setBEmail(''); setBPassword('');
-    }
+    const { error } = await supabase.auth.signUp({ email: bEmail.trim(), password: bPassword, options: { data: { role: 'bursar', school_id: userProfile.school_id, full_name: bName.trim() } }});
+    if (error) toast.error(error.message, { id: toastId });
+    else { toast.success('Bursar node account active!', { id: toastId }); setBName(''); setBEmail(''); setBPassword(''); }
   }
 
   function exportClassPDF(targetClassId = null) {
     const doc = new jsPDF();
     doc.text(`Financial Audit Report`, 14, 15);
-    
     const filtered = targetClassId ? students.filter(s => s.class_id === targetClassId) : students;
-    const tableRows = filtered.map(s => [
-      s.matricule, s.full_name, s.classes?.name || 'N/A', s.is_registered ? 'REG' : 'NO REG', `${Number(s.tuition_paid).toLocaleString()} XAF`
-    ]);
-
-    doc.autoTable({
-      head: [['Matricule', 'Student Name', 'Class Room', 'Reg Status', 'Tuition Ledger Paid']],
-      body: tableRows,
-      startY: 25,
-      theme: 'grid',
-      headStyles: { fillColor: [15, 23, 42] }
-    });
+    const tableRows = filtered.map(s => [ s.matricule, s.full_name, s.classes?.name || 'N/A', s.is_registered ? 'REG' : 'NO REG', `${Number(s.tuition_paid).toLocaleString()} XAF` ]);
+    doc.autoTable({ head: [['Matricule', 'Student Name', 'Class Room', 'Reg Status', 'Tuition Ledger Paid']], body: tableRows, startY: 25, theme: 'grid', headStyles: { fillColor: [15, 23, 42] }});
     doc.save(`Financial_Report_Export.pdf`);
     toast.success('PDF Generated successfully.');
   }
 
   return (
-    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-6 md:space-y-8">
+    <div className="p-4 md:p-8 max-w-7xl mx-auto space-y-6 md:space-y-8 relative">
       
+      {/* --- IPHONE GLASSMORPHISM GLOBAL OVERLAY --- */}
+      {popupConfig && (
+        <div className="fixed inset-0 z-50 flex items-start justify-start" onClick={closePopup}>
+          {/* Blurred Background Filter */}
+          <div className="absolute inset-0 bg-slate-900/30 backdrop-blur-md transition-all duration-300"></div>
+          
+          {/* Glass Card Container */}
+          <div 
+            className="absolute bg-white/80 dark:bg-slate-900/80 backdrop-blur-2xl border border-white/50 dark:border-slate-700/50 shadow-[0_8px_30px_rgb(0,0,0,0.2)] rounded-3xl p-6 w-[320px] sm:w-[380px] animate-fadeIn"
+            style={popupPos.isMobile 
+              ? { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' } 
+              : { top: popupPos.y, left: popupPos.x }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button onClick={closePopup} className="absolute top-4 right-4 bg-slate-200/50 hover:bg-slate-300/50 p-1.5 rounded-full text-slate-600 transition">
+              <X size={16} />
+            </button>
+
+            {/* POPUP 1: QR CODE */}
+            {popupConfig.type === 'QR' && (
+              <div className="text-center space-y-4 pt-2">
+                <div className="bg-slate-100 p-3 rounded-2xl inline-block shadow-inner"><QrCode size={40} className="text-slate-700" /></div>
+                <h3 className="text-xl font-black text-slate-900 tracking-tight">Public Gateway QR</h3>
+                <p className="text-sm text-slate-600 font-medium">Download the ultra-high resolution version of this QR code for printing on posters and campus walls.</p>
+                <button onClick={downloadQRPDF} className="w-full flex items-center justify-center gap-2 bg-indigo-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-indigo-600/30 hover:bg-indigo-700 transition">
+                  <Download size={18} /> Export PDF Format
+                </button>
+              </div>
+            )}
+
+            {/* POPUP 2: REVENUE LOG */}
+            {popupConfig.type === 'REVENUE' && (
+              <div className="text-center space-y-4 pt-2">
+                <div className="bg-emerald-100 p-3 rounded-2xl inline-block shadow-inner"><FileText size={40} className="text-emerald-700" /></div>
+                <h3 className="text-xl font-black text-slate-900 tracking-tight">Gross Revenue Log</h3>
+                <p className="text-sm text-slate-600 font-medium">Generate a comprehensive audit PDF containing all chronological financial transactions, names, and total sums.</p>
+                <button onClick={downloadRevenuePDF} className="w-full flex items-center justify-center gap-2 bg-emerald-600 text-white py-3 rounded-xl font-bold shadow-lg shadow-emerald-600/30 hover:bg-emerald-700 transition">
+                  <Download size={18} /> Download Audit PDF
+                </button>
+              </div>
+            )}
+
+            {/* POPUP 3: STUDENT DETAILS */}
+            {popupConfig.type === 'STUDENT' && (
+              <div className="space-y-4 pt-2 text-left">
+                <h3 className="text-xl font-black text-slate-900 tracking-tight truncate pr-6">{popupConfig.payload.full_name}</h3>
+                
+                <div className="bg-slate-50/50 border border-white/40 p-4 rounded-2xl space-y-3">
+                  <div className="grid grid-cols-2 gap-x-2 gap-y-3 text-sm">
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Matricule</span><span className="font-mono font-bold text-slate-800">{popupConfig.payload.matricule}</span></div>
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Class Segment</span><span className="font-bold text-indigo-600">{popupConfig.payload.classes?.name || 'N/A'}</span></div>
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Parent Contact</span><span className="font-mono font-bold text-slate-800">{popupConfig.payload.parent_phone}</span></div>
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Gender</span><span className="font-bold text-slate-800">{popupConfig.payload.gender || 'N/A'}</span></div>
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Date of Birth</span><span className="font-bold text-slate-800">{popupConfig.payload.date_of_birth || 'N/A'}</span></div>
+                    <div><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Status</span><span className={`font-black uppercase text-[10px] px-2 py-0.5 rounded ${popupConfig.payload.is_registered ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{popupConfig.payload.is_registered ? 'Verified' : 'Pending'}</span></div>
+                    <div className="col-span-2"><span className="block text-[10px] font-black text-slate-400 uppercase tracking-wider">Place of Birth</span><span className="font-bold text-slate-800">{popupConfig.payload.place_of_birth || 'N/A'}</span></div>
+                  </div>
+                </div>
+
+                {!popupConfig.payload.is_registered && (
+                  <button onClick={() => handleDeleteStudent(popupConfig.payload.id)} className="w-full flex items-center justify-center gap-2 bg-rose-50 border border-rose-200 text-rose-600 py-3 rounded-xl font-bold hover:bg-rose-100 hover:text-rose-700 transition">
+                    <Trash2 size={18} /> Delete Unregistered Record
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Analytics Hero Section */}
       <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 md:gap-6">
         <div className="col-span-1 lg:col-span-2 bg-slate-900 text-white p-6 md:p-8 rounded-2xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 shadow-xl">
@@ -134,7 +262,7 @@ export default function PrincipalDashboard({ userProfile }) {
             <p className="text-slate-400 text-xs md:text-sm font-medium">Manage rates, rosters, and financial operations.</p>
           </div>
           {qrUrl && (
-            <div className="bg-white p-2 rounded-xl text-center text-black text-[10px] font-black uppercase tracking-wider shadow-lg transform sm:rotate-3 self-end sm:self-auto">
+            <div onClick={(e) => handleOpenPopup(e, 'QR')} className="bg-white/90 backdrop-blur-sm p-2 rounded-xl text-center text-black text-[10px] font-black uppercase tracking-wider shadow-lg transform sm:rotate-3 self-end sm:self-auto cursor-pointer hover:scale-105 hover:rotate-0 transition duration-300">
               <img src={qrUrl} alt="Portal Address" className="w-16 h-16 md:w-20 md:h-20 mb-1 rounded mx-auto" />
               <span>Portal QR</span>
             </div>
@@ -142,7 +270,7 @@ export default function PrincipalDashboard({ userProfile }) {
         </div>
         
         <div className="col-span-1 lg:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 md:gap-4">
-            <div className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-row sm:flex-col items-center sm:items-start justify-between sm:justify-center">
+            <div onClick={(e) => handleOpenPopup(e, 'REVENUE')} className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 flex flex-row sm:flex-col items-center sm:items-start justify-between sm:justify-center cursor-pointer hover:shadow-md hover:border-emerald-200 hover:-translate-y-1 transition duration-300">
                 <span className="text-[10px] md:text-xs font-black uppercase text-slate-400 tracking-wider">Gross Revenue</span>
                 <span className="text-xl md:text-2xl font-black text-emerald-600">{analytics.revenue.toLocaleString()} <span className="text-[10px] md:text-xs">XAF</span></span>
             </div>
@@ -159,7 +287,7 @@ export default function PrincipalDashboard({ userProfile }) {
 
       {/* Control Panels Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-          {/* Global Config Settings Interface Row */}
+          {/* Global Config Settings */}
           <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100">
             <h2 className="text-base md:text-lg font-black mb-4 md:mb-6 text-slate-800 flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-emerald-500"></span> Financial Rules Engine</h2>
             {config ? (
@@ -206,7 +334,7 @@ export default function PrincipalDashboard({ userProfile }) {
             </form>
           </div>
 
-          {/* Staff Provisioning Pipeline Panel */}
+          {/* Staff Provisioning Panel */}
           <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-1 md:col-span-2">
             <h2 className="text-base md:text-lg font-black mb-4 md:mb-6 text-slate-800 flex items-center gap-2"><span className="w-3 h-3 rounded-full bg-purple-500"></span> Provision Bursar</h2>
             <form onSubmit={handleCreateBursar} className="space-y-3 md:space-y-4">
@@ -248,7 +376,7 @@ export default function PrincipalDashboard({ userProfile }) {
                     <tr><td colSpan="5" className="p-6 md:p-8 text-center text-slate-400 font-bold text-sm">No students registered yet.</td></tr>
                 ) : (
                     students.map(s => (
-                    <tr key={s.id} className="text-xs md:text-sm hover:bg-slate-50/50 transition">
+                    <tr key={s.id} onClick={(e) => handleOpenPopup(e, 'STUDENT', s)} className="text-xs md:text-sm hover:bg-slate-50/80 cursor-pointer transition">
                         <td className="p-3 md:p-4 font-mono font-bold text-slate-500">{s.matricule}</td>
                         <td className="p-3 md:p-4 font-bold text-slate-900">{s.full_name}</td>
                         <td className="p-3 md:p-4 text-slate-600 font-medium">{s.classes?.name || 'Unassigned'}</td>

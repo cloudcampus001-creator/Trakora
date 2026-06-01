@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-hot-toast';
 import { Inbox, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { printThermalReceipt } from '../utils/printer';
 
 export default function BursarDashboard({ userProfile }) {
   const [pendingApps, setPendingApps] = useState([]);
@@ -30,10 +31,20 @@ export default function BursarDashboard({ userProfile }) {
   }, []);
 
   async function loadDashboardData() {
-    const { data: config, error: cfgError } = await supabase.from('school_configs').select('*').eq('school_id', userProfile.school_id).single();
+    // We now fetch the school's name along with the configuration for the receipt header
+    const { data: configData, error: cfgError } = await supabase
+      .from('school_configs')
+      .select('*, schools(name)')
+      .eq('school_id', userProfile.school_id)
+      .single();
       
     if (cfgError) setConfigError(true);
-    if (config) { setSchoolConfig(config); setConfigError(false); }
+    if (configData) { 
+        // Merge the school name into the config object for easier passing
+        const fullConfig = { ...configData, name: configData.schools?.name };
+        setSchoolConfig(fullConfig); 
+        setConfigError(false); 
+    }
 
     const { data: pending } = await supabase.from('students').select('*, classes(name)').eq('school_id', userProfile.school_id).eq('application_status', 'PENDING_REVIEW').order('created_at', { ascending: false });
     setPendingApps(pending || []);
@@ -65,9 +76,15 @@ export default function BursarDashboard({ userProfile }) {
 
     const toastId = toast.loading(`Processing ${Number(amount).toLocaleString()} XAF...`);
 
-    const { error: txnError } = await supabase.from('financial_transactions').insert([{
-      school_id: userProfile.school_id, student_id: targetStudent.id, amount: Number(amount), type: feeType, payment_method: 'CASH_DIGITIZED_SIMULATED', processed_by: userProfile.id, status: 'COMPLETED'
-    }]);
+    const { data: transaction, error: txnError } = await supabase.from('financial_transactions').insert([{
+      school_id: userProfile.school_id, 
+      student_id: targetStudent.id, 
+      amount: Number(amount), 
+      type: feeType, 
+      payment_method: 'CASH', // Changed from simulated for actual cash logging
+      processed_by: userProfile.id, 
+      status: 'COMPLETED'
+    }]).select().single();
 
     if (txnError) return toast.error("Transaction failed: " + txnError.message, { id: toastId });
 
@@ -85,6 +102,20 @@ export default function BursarDashboard({ userProfile }) {
 
     toast.success(`${Number(amount).toLocaleString()} XAF recorded successfully for ${targetStudent.full_name}.`, { id: toastId, duration: 4000 });
     
+    // --- TRIGGER THERMAL PRINTER ---
+    const receiptData = {
+        id: transaction.id,
+        student_name: targetStudent.full_name,
+        matricule: targetStudent.matricule,
+        type: feeType === 'REGISTRATION' ? 'Registration Validation' : 'Tuition Allocation',
+        amount: transaction.amount,
+        payment_method: 'Cash Payment',
+        bursar_name: userProfile.full_name
+    };
+    
+    printThermalReceipt(receiptData, schoolConfig);
+    // ---------------------------------
+
     if (isFallbackSearch) {
       setSearchedStudent(null);
       setSearchAmount('');
@@ -139,7 +170,7 @@ export default function BursarDashboard({ userProfile }) {
               </div>
             </div>
             <button className="bg-emerald-600 text-white w-full p-3.5 md:p-4 rounded-xl font-black text-xs md:text-sm uppercase tracking-wider hover:bg-emerald-700 transition shadow-lg shadow-emerald-600/30">
-              Authorize Cash Digitization (Simulated)
+              Process Cash & Print Receipt
             </button>
           </form>
         )}
@@ -238,7 +269,7 @@ export default function BursarDashboard({ userProfile }) {
                       </div>
 
                       <button type="submit" className="w-full md:w-auto bg-emerald-600 text-white px-6 md:px-8 py-3.5 md:py-4 rounded-xl font-black text-xs uppercase tracking-widest hover:bg-emerald-700 transition shadow-lg shadow-emerald-600/30">
-                        Remit Cash
+                        Remit Cash & Print
                       </button>
                     </form>
                   )}
@@ -267,11 +298,12 @@ export default function BursarDashboard({ userProfile }) {
                 <th className="p-3 md:p-5">Allocation</th>
                 <th className="p-3 md:p-5 text-right">Value Settled</th>
                 <th className="p-3 md:p-5 text-center">Route</th>
+                <th className="p-3 md:p-5 text-center">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-50 text-xs md:text-sm">
               {completedTxns.length === 0 ? (
-                <tr><td colSpan="5" className="p-8 md:p-12 text-center text-slate-400 font-medium text-xs md:text-sm">No confirmed logs indexed on system nodes.</td></tr>
+                <tr><td colSpan="6" className="p-8 md:p-12 text-center text-slate-400 font-medium text-xs md:text-sm">No confirmed logs indexed on system nodes.</td></tr>
               ) : (
                 completedTxns.map(tx => (
                   <tr key={tx.id} className="hover:bg-slate-50/80 transition">
@@ -287,6 +319,22 @@ export default function BursarDashboard({ userProfile }) {
                       <span className="bg-slate-100 text-slate-500 text-[8px] md:text-[9px] font-mono font-black uppercase tracking-widest px-1.5 md:px-2 py-1 rounded border">
                         {tx.payment_method.replace('_SIMULATED', '')}
                       </span>
+                    </td>
+                    <td className="p-3 md:p-5 text-center">
+                       <button onClick={() => {
+                           const receiptData = {
+                               id: tx.id,
+                               student_name: tx.students?.full_name,
+                               matricule: tx.students?.matricule,
+                               type: tx.type === 'REGISTRATION' ? 'Registration Validation' : 'Tuition Allocation',
+                               amount: tx.amount,
+                               payment_method: tx.payment_method,
+                               bursar_name: userProfile.full_name
+                           };
+                           printThermalReceipt(receiptData, schoolConfig);
+                       }} className="bg-slate-200 text-slate-700 hover:bg-slate-300 px-3 py-1.5 rounded text-xs font-bold transition">
+                           Reprint
+                       </button>
                     </td>
                   </tr>
                 ))
