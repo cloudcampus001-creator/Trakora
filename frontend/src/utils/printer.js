@@ -1,41 +1,50 @@
 export const printThermalReceipt = async (transaction, schoolConfig) => {
   try {
-    // 1. Request the Bluetooth device (Triggers the browser popup)
+    // 1. Request the device with expanded UUID coverage for the MY-7565
     const device = await navigator.bluetooth.requestDevice({
       acceptAllDevices: true,
-      // Common UUIDs for Chinese portable thermal printers like the MY-7565
       optionalServices: [
+        0x18F0, 
+        0xFF00, // Very common primary service for Baihuo/portable printers
         '000018f0-0000-1000-8000-00805f9b34fb', 
+        '0000ff00-0000-1000-8000-00805f9b34fb',
         'e7810a71-73ae-499d-8c15-faa9aef0c3f2',
         '49535343-fe7d-4ae5-8fa9-9fafd205e455'
       ] 
     });
 
-    // 2. Connect to the printer's internal GATT server
     const server = await device.gatt.connect();
-
-    // 3. Find the primary data service
     const services = await server.getPrimaryServices();
-    if (services.length === 0) throw new Error("No Bluetooth services found.");
-    const service = services[0]; 
+    
+    let writeCharacteristic = null;
 
-    // 4. Find the characteristic that allows us to write data to the printer
-    const characteristics = await service.getCharacteristics();
-    const writeCharacteristic = characteristics.find(
-      c => c.properties.write || c.properties.writeWithoutResponse
-    );
+    // 2. Loop through EVERY service to find the active print channel
+    for (const service of services) {
+      const characteristics = await service.getCharacteristics();
+      for (const characteristic of characteristics) {
+        if (characteristic.properties.writeWithoutResponse || characteristic.properties.write) {
+          writeCharacteristic = characteristic;
+          break; // Found the correct channel
+        }
+      }
+      if (writeCharacteristic) break; // Stop searching once found
+    }
 
-    if (!writeCharacteristic) throw new Error("Could not find a writable connection.");
+    if (!writeCharacteristic) {
+      throw new Error("Could not find a writable print channel. Ensure the printer is ready.");
+    }
 
-    // 5. Setup ESC/POS Commands for styling (Center, Left, Bold)
+    // 3. Set up ESC/POS Commands
     const ESC = '\x1B';
+    const INIT = ESC + '@'; // Initialize printer (Clears any stuck memory buffers)
     const CENTER = ESC + 'a\x01';
     const LEFT = ESC + 'a\x00';
     const BOLD_ON = ESC + 'E\x01';
     const BOLD_OFF = ESC + 'E\x00';
 
-    // 6. Build the text-based receipt (A standard 58mm printer holds 32 characters per line)
+    // 4. Build the receipt
     const text = 
+      INIT + // Send clear command first
       CENTER + BOLD_ON + 
       (schoolConfig?.name || 'CLOUD CAMPUS') + '\n' + 
       BOLD_OFF + 
@@ -52,7 +61,6 @@ export const printThermalReceipt = async (transaction, schoolConfig) => {
       `Matricule: ${transaction.matricule || 'N/A'}\n` +
       "--------------------------------\n" + 
       "DESCRIPTION               AMOUNT\n" +
-      // Pad the type string to align the amount to the right
       `${transaction.type.padEnd(20)} ${Number(transaction.amount).toLocaleString()}\n` +
       "--------------------------------\n" + 
       BOLD_ON +
@@ -62,29 +70,38 @@ export const printThermalReceipt = async (transaction, schoolConfig) => {
       "--------------------------------\n" + 
       CENTER +
       "Thank you for your payment!\n" +
-      "Powered by Cloud Campus\n" +
-      "\n\n\n\n"; // Feeds extra paper so the bursar can tear it cleanly
+      "\n\n\n"; 
 
-    // 7. Encode the string into bytes
+    // 5. Encode the text into bytes
     const encoder = new TextEncoder();
     const data = encoder.encode(text);
 
-    // 8. Stream the bytes in 20-byte chunks to prevent overwhelming the printer's memory
+    // 6. Stream the bytes in small 20-byte chunks 
     const CHUNK_SIZE = 20;
     for (let i = 0; i < data.length; i += CHUNK_SIZE) {
       const chunk = data.slice(i, i + CHUNK_SIZE);
-      await writeCharacteristic.writeValue(chunk);
+      
+      // Android Chrome prefers writeValueWithoutResponse to prevent freezing
+      if (writeCharacteristic.properties.writeWithoutResponse) {
+        await writeCharacteristic.writeValueWithoutResponse(chunk);
+      } else {
+        await writeCharacteristic.writeValue(chunk); 
+      }
+      
+      // Tiny 10ms delay to give the MY-7565 buffer time to process the bytes
+      await new Promise(resolve => setTimeout(resolve, 10)); 
     }
 
-    // 9. Disconnect cleanly
+    // 7. Clean up
     device.gatt.disconnect();
-    console.log("Receipt printed successfully!");
+    
+    // Give the bursar confirmation that the data sent successfully
+    alert("Receipt printed successfully!");
 
   } catch (error) {
-    console.error("Bluetooth Printing Failed:", error);
-    // If the user cancels the popup, it throws a DOMException, which we can safely ignore
+    console.error("Bluetooth Error:", error);
     if (error.name !== 'NotFoundError') {
-        alert("Bluetooth Error: " + error.message);
+        alert("Print Error: " + error.message);
     }
   }
 };
