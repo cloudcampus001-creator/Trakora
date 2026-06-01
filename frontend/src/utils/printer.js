@@ -265,12 +265,6 @@ function openBrowserPrintWindow(transaction, schoolConfig) {
     🖨️&nbsp; Imprimer / Print
   </button>
 
-  <script>
-    // Auto-trigger print dialog after the page has fully rendered
-    window.addEventListener('load', function () {
-      setTimeout(function () { window.print(); }, 650);
-    });
-  </script>
 </body>
 </html>`;
 
@@ -278,6 +272,8 @@ function openBrowserPrintWindow(transaction, schoolConfig) {
   if (popup) {
     popup.document.write(html);
     popup.document.close();
+    popup.focus();
+    popup.print(); // Instant — no delay, no waiting for load event
   } else {
     alert(
       '⚠️  Reçu bloqué par le navigateur.\n' +
