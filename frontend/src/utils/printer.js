@@ -1,50 +1,29 @@
 export const printThermalReceipt = async (transaction, schoolConfig) => {
   try {
-    alert("Connecting... please wait.");
+    // 1. Request device (Using the specific service we found)
     const device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: [
-        '000018f0-0000-1000-8000-00805f9b34fb', // Common printer service
-        '00001800-0000-1000-8000-00805f9b34fb',
-        'e7810a71-73ae-499d-8c15-faa9aef0c3f2'
-      ]
+      filters: [{ services: ['000018f0-0000-1000-8000-00805f9b34fb'] }]
     });
 
     const server = await device.gatt.connect();
-    const services = await server.getPrimaryServices();
+    const service = await server.getPrimaryService('000018f0-0000-1000-8000-00805f9b34fb');
+    // Using the characteristic you identified in image_c7855f.png
+    const characteristic = await service.getCharacteristic('bef8d6c9-9c21-4c9e-b632-bd58c1009f9f');
+
+    // 2. Build Binary Commands (ESC/POS Language)
+    // 0x1B, 0x40 = Reset Printer
+    // 0x0A = Line Feed (Tells printer to print the line)
     const encoder = new TextEncoder();
-    const data = encoder.encode("TEST PRINT\n\n\n\n");
+    const textData = encoder.encode("TESTING PRINT HEAD\n\n\n\n");
+    const resetCommand = new Uint8Array([0x1B, 0x40]); 
+    const feedCommand = new Uint8Array([0x0A, 0x0A, 0x0A]); // Force paper feed
 
-    let foundWritable = false;
+    // 3. Send the command sequence
+    await characteristic.writeValue(resetCommand);
+    await characteristic.writeValue(textData);
+    await characteristic.writeValue(feedCommand);
 
-    // Loop through EVERYTHING
-    for (const service of services) {
-      console.log("Checking Service: " + service.uuid);
-      const characteristics = await service.getCharacteristics();
-      
-      for (const char of characteristics) {
-        console.log("Checking Characteristic: " + char.uuid);
-        
-        // Only try to write if the characteristic supports 'write'
-        if (char.properties.write || char.properties.writeWithoutResponse) {
-          try {
-            console.log("Attempting to write to: " + char.uuid);
-            await char.writeValue(data);
-            alert("SUCCESS! Wrote to: " + char.uuid);
-            foundWritable = true;
-            // If this works, we stop.
-            return; 
-          } catch (e) {
-            console.error("Failed to write to " + char.uuid, e);
-          }
-        }
-      }
-    }
-
-    if (!foundWritable) {
-      alert("No writable characteristics found. The printer is connected, but I cannot find a 'write' channel.");
-    }
-
+    alert("Commands sent! Did it print?");
     device.gatt.disconnect();
   } catch (error) {
     alert("Error: " + error.message);
