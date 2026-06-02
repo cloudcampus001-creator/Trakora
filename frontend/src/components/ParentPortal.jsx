@@ -88,7 +88,7 @@ export default function ParentPortal({ schoolSlug }) {
           class_id: classId,
           gender: gender,
           date_of_birth: dob, 
-          pob: pob,
+          place_of_birth: pob,
           parent_phone: phone,
           application_status: 'PENDING_REVIEW'
         }]).select().single();
