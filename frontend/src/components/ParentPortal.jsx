@@ -32,6 +32,8 @@ export default function ParentPortal({ schoolSlug }) {
   useEffect(() => {
     if (!currentAppId) return;
     checkApplicationStatus();
+    
+    // Subscribe to status changes
     const statusChannel = supabase
       .channel(`live_status_${currentAppId}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students', filter: `id=eq.${currentAppId}` }, () => {
@@ -41,17 +43,19 @@ export default function ParentPortal({ schoolSlug }) {
   }, [currentAppId]);
 
   async function loadSchoolData() {
-    const { data: schoolData } = await supabase.from('schools').select('*').eq('slug', schoolSlug).single();
+    const { data: schoolData, error } = await supabase.from('schools').select('*').eq('slug', schoolSlug).single();
     if (schoolData) {
       setSchool(schoolData);
       const { data: classData } = await supabase.from('classes').select('*').eq('school_id', schoolData.id);
       setClasses(classData || []);
+    } else {
+        console.error("School load error:", error);
     }
   }
 
   async function checkApplicationStatus() {
     if (!currentAppId) return;
-    const { data: studentData } = await supabase.from('students').select('*, classes(*)').eq('id', currentAppId).single();
+    const { data: studentData, error } = await supabase.from('students').select('*, classes(*)').eq('id', currentAppId).single();
     if (studentData) {
       setAppStatus(studentData.application_status);
       if (studentData.application_status === 'APPROVED') {
@@ -66,32 +70,49 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // --- Submission & Data Handlers ---
+  // --- Fixed Submission Handler ---
 
   async function handleSubmitRegistration(e) {
     e.preventDefault();
-    const toastId = toast.loading('Submitting application...');
-    const { data, error } = await supabase.from('students').insert([{
-      school_id: school.id,
-      full_name: fullName,
-      class_id: classId,
-      gender,
-      dob,
-      pob,
-      parent_phone: phone,
-      application_status: 'PENDING_REVIEW'
-    }]).select().single();
-
-    if (error) {
-      toast.error('Submission failed.');
-    } else {
-      localStorage.setItem('edu_app_id', data.id);
-      setCurrentAppId(data.id);
-      toast.success('Application submitted!');
+    
+    // 1. Client-side validation
+    if (!school || !school.id) { toast.error("Configuration error: School not loaded."); return; }
+    if (!fullName || !classId || !gender || !dob || !pob || !phone) {
+        toast.error("Please fill in all required fields.");
+        return;
     }
-    toast.dismiss(toastId);
+
+    const toastId = toast.loading('Submitting application...');
+    
+    try {
+        const { data, error } = await supabase.from('students').insert([{
+          school_id: school.id,
+          full_name: fullName,
+          class_id: classId,
+          gender: gender,
+          dob: dob,
+          pob: pob,
+          parent_phone: phone,
+          application_status: 'PENDING_REVIEW'
+        }]).select().single();
+
+        if (error) {
+            console.error("Supabase Error Detail:", error); // Check console for exact message
+            toast.error(`Submission failed: ${error.message}`);
+        } else {
+          localStorage.setItem('edu_app_id', data.id);
+          setCurrentAppId(data.id);
+          toast.success('Application submitted!');
+        }
+    } catch (err) {
+        console.error("Unexpected error:", err);
+        toast.error("An unexpected error occurred.");
+    } finally {
+        toast.dismiss(toastId);
+    }
   }
 
+  // --- Other handlers remain similar ---
   async function handleRecoverMatricule(e) {
     e.preventDefault();
     const { data, error } = await supabase.from('students').select('*, classes(*)').eq('parent_phone', recoveryPhone).eq('school_id', school.id);
@@ -112,8 +133,6 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // --- Printing & Payment Logic ---
-
   async function handlePrintReceipt(txData) {
     const toastId = toast.loading('Sending to Bursar printer...');
     const { error } = await supabase.from('print_jobs').insert([{
@@ -123,8 +142,13 @@ export default function ParentPortal({ schoolSlug }) {
       content: `Receipt for ${txData.student_name || 'Student'}: ${txData.amount} XAF`
     }]);
     
-    if (error) toast.error("Printer connection failed.");
-    else toast.success("Printing initiated!");
+    if (error) {
+        console.error("Print error:", error);
+        toast.error("Printer connection failed.");
+    } else {
+        toast.success("Printing initiated!");
+    }
+    toast.dismiss(toastId);
   }
 
   async function handleMoMoPayment(type) {
@@ -161,26 +185,27 @@ export default function ParentPortal({ schoolSlug }) {
     setPortalMode('SELECTION');
   }
 
+  // --- Render logic ---
   if (isSuccess) return (
-    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
-      <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center space-y-6">
-        <CheckCircle className="w-20 h-20 text-emerald-500 mx-auto" />
-        <h2 className="text-2xl font-black">Payment Successful!</h2>
-        <button onClick={() => handlePrintReceipt(lastTransaction)} className="w-full flex items-center justify-center gap-2 bg-slate-900 text-white p-4 rounded-xl font-bold">
-          <Printer className="w-5 h-5" /> Print Receipt
-        </button>
-        <button onClick={resetPortal} className="w-full flex items-center justify-center gap-2 bg-slate-100 text-slate-600 p-4 rounded-xl font-bold">
-          <ArrowLeft className="w-5 h-5" /> Pay for another child
-        </button>
-      </div>
-    </div>
+     <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
+       <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center space-y-6">
+         <CheckCircle className="w-20 h-20 text-emerald-500 mx-auto" />
+         <h2 className="text-2xl font-black">Payment Successful!</h2>
+         <button onClick={() => handlePrintReceipt(lastTransaction)} className="w-full flex items-center justify-center gap-2 bg-slate-900 text-white p-4 rounded-xl font-bold">
+           <Printer className="w-5 h-5" /> Print Receipt
+         </button>
+         <button onClick={resetPortal} className="w-full flex items-center justify-center gap-2 bg-slate-100 text-slate-600 p-4 rounded-xl font-bold">
+           <ArrowLeft className="w-5 h-5" /> Pay for another child
+         </button>
+       </div>
+     </div>
   );
 
   if (!school) return (
-    <div className="min-h-screen flex flex-col items-center justify-center p-4 space-y-4 bg-slate-100">
-      <div className="w-12 h-12 border-4 border-slate-300 border-t-emerald-600 rounded-full animate-spin"></div>
-      <div className="font-bold text-slate-500 animate-pulse">Connecting to Institution...</div>
-    </div>
+     <div className="min-h-screen flex flex-col items-center justify-center p-4 space-y-4 bg-slate-100">
+       <div className="w-12 h-12 border-4 border-slate-300 border-t-emerald-600 rounded-full animate-spin"></div>
+       <div className="font-bold text-slate-500 animate-pulse">Connecting to Institution...</div>
+     </div>
   );
 
   return (
@@ -266,7 +291,7 @@ export default function ParentPortal({ schoolSlug }) {
                 <h2 className="font-bold text-emerald-700 mt-3 sm:mt-4 mb-1 sm:mb-2 uppercase text-[10px] sm:text-xs tracking-wider">3. Guardian Protocol</h2>
                 <input className="border p-3 w-full rounded-lg outline-none focus:ring-2 focus:ring-emerald-500 transition text-sm sm:text-base" placeholder="Parent Mobile Money Number" type="tel" value={phone} onChange={e=>setPhone(e.target.value)} required />
 
-                <button className="w-full bg-slate-900 text-white p-3.5 rounded-xl font-bold mt-4 hover:bg-slate-800 transition shadow text-sm sm:text-base">Submit Application</button>
+                <button type="submit" className="w-full bg-slate-900 text-white p-3.5 rounded-xl font-bold mt-4 hover:bg-slate-800 transition shadow text-sm sm:text-base">Submit Application</button>
               </form>
             )}
 
