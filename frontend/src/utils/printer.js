@@ -1,6 +1,12 @@
 /**
  * Trakora — Bluetooth CPCL Receipt Printer
- * PT260 & compatible thermal printers
+ * Calibrated for 58 mm paper (PT-260 & compatible)
+ *
+ * Key constraints discovered from hardware testing:
+ *  - Font 4 max ≈ 20 chars per line at x = 10
+ *  - Line height must be 40 dots (LH = 30 causes overlapping)
+ *  - Lines must be sent one-by-one; 512-byte chunks can split CPCL
+ *    commands and corrupt the output
  */
 
 export const printThermalReceipt = async (transaction, schoolConfig) => {
@@ -16,7 +22,8 @@ export const printThermalReceipt = async (transaction, schoolConfig) => {
     .replace('_SIMULATED', '')
     .replace(/_/g, ' ');
 
-  const t = (str, max = 28) => String(str || '').substring(0, max);
+  // Safe truncation — font 4 fits ~20 chars at x=10 on 58 mm paper
+  const t = (str, max = 20) => String(str || '').substring(0, max);
 
   try {
     alert('Connecting and scanning for print channel...');
@@ -29,88 +36,88 @@ export const printThermalReceipt = async (transaction, schoolConfig) => {
 
     // 2. Find writable characteristic
     const services = await server.getPrimaryServices();
-    let writeCharacteristic = null;
-
+    let writeChar = null;
     for (const service of services) {
-      const characteristics = await service.getCharacteristics();
-      writeCharacteristic = characteristics.find(
-        c => c.properties.write || c.properties.writeWithoutResponse
-      );
-      if (writeCharacteristic) break;
+      const chars = await service.getCharacteristics();
+      writeChar = chars.find(c => c.properties.write || c.properties.writeWithoutResponse);
+      if (writeChar) break;
     }
+    if (!writeChar) throw new Error('Could not find a writable channel. Please restart the printer.');
 
-    if (!writeCharacteristic) {
-      throw new Error('Could not find a writable channel. Please restart the printer.');
-    }
+    // 3. Build CPCL
+    const LH  = 40;  // Font-4 line height that works on this hardware
+    const BIG = 55;  // Line height after font-7 (large text)
+    const SEP  = '-'.repeat(20); // Safe for 58 mm paper
+    const SEP2 = '='.repeat(20);
 
-    // 3. Build CPCL receipt
-    const SEP  = '-'.repeat(36);
-    const SEP2 = '='.repeat(36);
     const lines = [];
     let y = 10;
-    const LH = 30;
-    const SH = 24;
     const push = (...args) => lines.push(...args);
 
-    push(`! 0 200 200 1200 1`);
+    push(`! 0 200 200 1600 1`); // Tall enough for all optional fields
 
-    push(`TEXT 7 0 20 ${y} ${t(schoolName, 20)}`);              y += 48;
-    push(`TEXT 4 0 10 ${y} RECU DE PAIEMENT OFFICIEL`);          y += LH;
-    push(`TEXT 4 0 10 ${y} OFFICIAL PAYMENT RECEIPT`);           y += LH;
-    push(`TEXT 4 0 10 ${y} ${SEP2}`);                             y += LH;
+    // ── Header ───────────────────────────────────────────────────────────────
+    push(`TEXT 7 0 10 ${y} ${t(schoolName, 10)}`);        y += BIG;
+    push(`TEXT 4 0 10 ${y} RECU DE PAIEMENT`);             y += LH;
+    push(`TEXT 4 0 10 ${y} OFFICIAL RECEIPT`);             y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP2}`);                       y += LH;
 
-    push(`TEXT 4 0 10 ${y} Date: ${dateStr}  Heure: ${timeStr}`); y += LH;
-    push(`TEXT 4 0 10 ${y} Reference: ${refId}`);                 y += LH;
-    push(`TEXT 4 0 10 ${y} ${SEP}`);                              y += LH;
+    // ── Date / Time / Reference ───────────────────────────────────────────────
+    push(`TEXT 4 0 10 ${y} Date: ${dateStr}`);              y += LH;
+    push(`TEXT 4 0 10 ${y} Heure: ${timeStr}`);             y += LH;
+    push(`TEXT 4 0 10 ${y} Ref: ${t(refId, 16)}`);          y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP}`);                        y += LH;
 
-    push(`TEXT 4 1 10 ${y} INFORMATIONS ETUDIANT`);               y += LH;
-    push(`TEXT 4 0 10 ${y} Nom: ${t(transaction.student_name)}`);      y += LH;
-    push(`TEXT 4 0 10 ${y} Matricule: ${t(transaction.matricule, 22)}`); y += LH;
+    // ── Student Information ───────────────────────────────────────────────────
+    push(`TEXT 4 0 10 ${y} INFO. ETUDIANT`);                y += LH;
+    push(`TEXT 4 0 10 ${y} Nom: ${t(transaction.student_name, 15)}`);    y += LH;
+    push(`TEXT 4 0 10 ${y} Matr: ${t(transaction.matricule, 14)}`);      y += LH;
 
-    if (transaction.class_name)     { push(`TEXT 4 0 10 ${y} Classe: ${t(transaction.class_name)}`);          y += LH; }
-    if (transaction.gender)         { push(`TEXT 4 0 10 ${y} Sexe: ${t(transaction.gender, 10)}`);             y += LH; }
-    if (transaction.date_of_birth)  { push(`TEXT 4 0 10 ${y} Date Naiss.: ${transaction.date_of_birth}`);     y += LH; }
-    if (transaction.place_of_birth) { push(`TEXT 4 0 10 ${y} Lieu Naiss.: ${t(transaction.place_of_birth)}`); y += LH; }
-    if (transaction.parent_phone)   { push(`TEXT 4 0 10 ${y} Tel. Parent: ${t(transaction.parent_phone, 20)}`); y += LH; }
+    if (transaction.class_name)     { push(`TEXT 4 0 10 ${y} Classe: ${t(transaction.class_name, 12)}`);   y += LH; }
+    if (transaction.gender)         { push(`TEXT 4 0 10 ${y} Sexe: ${t(transaction.gender, 14)}`);          y += LH; }
+    if (transaction.date_of_birth)  { push(`TEXT 4 0 10 ${y} Naiss: ${t(transaction.date_of_birth, 13)}`); y += LH; }
+    if (transaction.place_of_birth) { push(`TEXT 4 0 10 ${y} Lieu: ${t(transaction.place_of_birth, 14)}`); y += LH; }
+    if (transaction.parent_phone)   { push(`TEXT 4 0 10 ${y} Tel: ${t(transaction.parent_phone, 15)}`);    y += LH; }
 
-    push(`TEXT 4 0 10 ${y} ${SEP}`); y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP}`);                        y += LH;
 
-    push(`TEXT 4 1 10 ${y} DETAILS DU PAIEMENT`);                y += LH;
-    push(`TEXT 4 0 10 ${y} Objet: ${t(transaction.type, 26)}`);   y += LH;
-    push(`TEXT 4 0 10 ${y} Mode: ${t(payMethod, 26)}`);            y += LH;
-    push(`TEXT 4 0 10 ${y} ${SEP}`);                               y += LH;
+    // ── Payment Details ───────────────────────────────────────────────────────
+    push(`TEXT 4 0 10 ${y} DETAILS PAIEMENT`);              y += LH;
+    push(`TEXT 4 0 10 ${y} ${t('Objet: ' + (transaction.type || 'N/A'), 20)}`); y += LH;
+    push(`TEXT 4 0 10 ${y} ${t('Mode: ' + payMethod, 20)}`); y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP}`);                        y += LH;
 
-    push(`TEXT 4 0 10 ${y} MONTANT PAYE / AMOUNT PAID:`);         y += SH;
-    push(`TEXT 7 0 20 ${y} ${t(amount + ' XAF', 22)}`);            y += 55;
-    push(`TEXT 4 0 10 ${y} ${SEP}`);                               y += LH;
+    // ── Amount (font-7 for emphasis, number only; XAF on the next line) ───────
+    push(`TEXT 4 0 10 ${y} MONTANT PAYE:`);                 y += LH;
+    push(`TEXT 7 0 10 ${y} ${t(amount, 10)}`);              y += BIG;
+    push(`TEXT 4 0 10 ${y} XAF`);                           y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP}`);                        y += LH;
 
-    push(`TEXT 4 0 10 ${y} Recu par: ${t(transaction.bursar_name || 'Economat', 24)}`); y += LH;
-    push(`TEXT 4 0 10 ${y} Signature: _____________________`);     y += LH;
-    push(`TEXT 4 0 10 ${y} ${SEP2}`);                              y += LH;
+    // ── Bursar Validation ─────────────────────────────────────────────────────
+    push(`TEXT 4 0 10 ${y} Par: ${t(transaction.bursar_name || 'Economat', 15)}`); y += LH;
+    push(`TEXT 4 0 10 ${y} Signature: _________`);          y += LH;
+    push(`TEXT 4 0 10 ${y} ${SEP2}`);                       y += LH;
 
-    push(`TEXT 4 0 10 ${y} Conservez ce recu / Keep this receipt`); y += LH;
-    push(`TEXT 4 0 10 ${y} Imprime le: ${dateStr} a ${timeStr}`);   y += LH;
-    push(`TEXT 4 0 10 ${y} *** MERCI / THANK YOU ***`);             y += LH;
-    push(`TEXT 4 0 10 ${y} Trakora School Finance System`);          y += LH;
+    // ── Footer ────────────────────────────────────────────────────────────────
+    push(`TEXT 4 0 10 ${y} Conservez ce recu`);             y += LH;
+    push(`TEXT 4 0 10 ${y} Keep this receipt`);             y += LH;
+    push(`TEXT 4 0 10 ${y} ${dateStr} ${timeStr.substring(0, 5)}`); y += LH;
+    push(`TEXT 4 0 10 ${y} MERCI / THANK YOU`);             y += LH;
+    push(`TEXT 4 0 10 ${y} Trakora Finance`);               y += LH;
 
     push(`FORM`);
     push(`PRINT`);
 
-    const cpclStr = lines.join('\r\n') + '\r\n';
-
-    // 4. Send in BLE-safe chunks
-    const encoder  = new TextEncoder();
-    const bytes    = encoder.encode(cpclStr);
-    const CHUNK_SZ = 512;
-
-    for (let i = 0; i < bytes.length; i += CHUNK_SZ) {
-      const chunk = bytes.slice(i, i + CHUNK_SZ);
-      if (writeCharacteristic.properties.writeWithoutResponse) {
-        await writeCharacteristic.writeValueWithoutResponse(chunk);
+    // 4. Send line-by-line — never splits a CPCL command across packets
+    const encoder = new TextEncoder();
+    for (const line of lines) {
+      const packet = encoder.encode(line + '\r\n');
+      if (writeChar.properties.writeWithoutResponse) {
+        await writeChar.writeValueWithoutResponse(packet);
       } else {
-        await writeCharacteristic.writeValue(chunk);
+        await writeChar.writeValue(packet);
       }
-      await new Promise(r => setTimeout(r, 60));
+      await new Promise(r => setTimeout(r, 20)); // Pacing between lines
     }
 
     alert('Receipt sent successfully!');
