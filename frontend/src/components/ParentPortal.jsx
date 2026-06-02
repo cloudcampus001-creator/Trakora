@@ -33,7 +33,6 @@ export default function ParentPortal({ schoolSlug }) {
     if (!currentAppId) return;
     checkApplicationStatus();
     
-    // Subscribe to status changes
     const statusChannel = supabase
       .channel(`live_status_${currentAppId}`)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'students', filter: `id=eq.${currentAppId}` }, () => {
@@ -70,12 +69,9 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // --- Fixed Submission Handler ---
-
   async function handleSubmitRegistration(e) {
     e.preventDefault();
     
-    // 1. Client-side validation
     if (!school || !school.id) { toast.error("Configuration error: School not loaded."); return; }
     if (!fullName || !classId || !gender || !dob || !pob || !phone) {
         toast.error("Please fill in all required fields.");
@@ -85,19 +81,20 @@ export default function ParentPortal({ schoolSlug }) {
     const toastId = toast.loading('Submitting application...');
     
     try {
+        // --- FIXED: Changed key from 'dob' to 'date_of_birth' ---
         const { data, error } = await supabase.from('students').insert([{
           school_id: school.id,
           full_name: fullName,
           class_id: classId,
           gender: gender,
-          dob: dob,
+          date_of_birth: dob, 
           pob: pob,
           parent_phone: phone,
           application_status: 'PENDING_REVIEW'
         }]).select().single();
 
         if (error) {
-            console.error("Supabase Error Detail:", error); // Check console for exact message
+            console.error("Supabase Error Detail:", error);
             toast.error(`Submission failed: ${error.message}`);
         } else {
           localStorage.setItem('edu_app_id', data.id);
@@ -112,7 +109,6 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // --- Other handlers remain similar ---
   async function handleRecoverMatricule(e) {
     e.preventDefault();
     const { data, error } = await supabase.from('students').select('*, classes(*)').eq('parent_phone', recoveryPhone).eq('school_id', school.id);
@@ -185,7 +181,6 @@ export default function ParentPortal({ schoolSlug }) {
     setPortalMode('SELECTION');
   }
 
-  // --- Render logic ---
   if (isSuccess) return (
      <div className="min-h-screen bg-slate-100 flex items-center justify-center p-4">
        <div className="bg-white p-8 rounded-3xl shadow-2xl max-w-sm w-full text-center space-y-6">
