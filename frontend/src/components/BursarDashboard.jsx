@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-hot-toast';
-import { Inbox, ShieldCheck, CheckCircle2 } from 'lucide-react';
+import { Inbox, ShieldCheck, CheckCircle2, BellRing } from 'lucide-react';
 import { printThermalReceipt } from '../utils/printer';
 
 export default function BursarDashboard({ userProfile }) {
@@ -17,8 +17,9 @@ export default function BursarDashboard({ userProfile }) {
   const [searchType, setSearchType] = useState('TUITION');
 
   const [activePaymentStudent, setActivePaymentStudent] = useState(null);
-
-  // ... inside BursarDashboard.jsx
+  
+  // NEW: The Remote Print Queue State
+  const [printQueue, setPrintQueue] = useState([]);
 
   useEffect(() => {
     loadDashboardData();
@@ -36,11 +37,8 @@ export default function BursarDashboard({ userProfile }) {
           // 2. Check if this is a REMOTE payment (e.g., from a Parent's phone via MoMo)
           const newTxn = payload.new;
           
-          // We only want to auto-print if it's for THIS school, and it was NOT manually processed by the Bursar
-          // (Assuming remote MoMo payments don't have a processed_by ID, or have a specific payment_method string)
           if (newTxn.school_id === userProfile.school_id && newTxn.payment_method.includes('MOMO')) {
               
-              // We need to fetch the student's name for the receipt since the payload only gives us the student_id
               const { data: studentInfo } = await supabase
                   .from('students')
                   .select('full_name, matricule, classes(name)')
@@ -54,27 +52,24 @@ export default function BursarDashboard({ userProfile }) {
                       student_name: studentInfo.full_name,
                       matricule: studentInfo.matricule,
                       class_name: studentInfo.classes?.name,
-                      type: newTxn.type === 'REGISTRATION' ? 'Registration Validation' : 'Tuition Allocation',
+                      type: newTxn.type === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
                       amount: newTxn.amount,
-                      payment_method: newTxn.payment_method,
-                      bursar_name: 'Auto: ' + newTxn.payment_method // Indicate it was an automatic payment
+                      payment_method: newTxn.payment_method.replace(/_/g, ' '),
+                      bursar_name: 'Paiement en ligne (MoMo)' 
                   };
 
-                  // 3. Trigger the silent background print!
-                  toast.success(`Remote payment received! Auto-printing receipt for ${studentInfo.full_name}...`, { duration: 5000, icon: '🖨️' });
-                  
-                  // Pass schoolConfig and set silent = true
-                  printThermalReceipt(receiptData, schoolConfig, true);
+                  // 3. Push to the Print Queue so the Bursar can tap to print
+                  setPrintQueue(prev => [...prev, receiptData]);
+                  toast('Remote payment received! Ready to print.', { icon: '🔔', duration: 5000 });
               }
           }
       })
       .subscribe();
 
     return () => supabase.removeChannel(masterChannel);
-  }, [schoolConfig, userProfile]); // Ensure dependencies are accurate
+  }, [schoolConfig, userProfile]); 
 
   async function loadDashboardData() {
-    // Fetch school config merged with school name for receipt header
     const { data: configData, error: cfgError } = await supabase
       .from('school_configs')
       .select('*, schools(name)')
@@ -88,7 +83,6 @@ export default function BursarDashboard({ userProfile }) {
       setConfigError(false);
     }
 
-    // Pending applications
     const { data: pending } = await supabase
       .from('students')
       .select('*, classes(name)')
@@ -97,7 +91,6 @@ export default function BursarDashboard({ userProfile }) {
       .order('created_at', { ascending: false });
     setPendingApps(pending || []);
 
-    // Approved applications awaiting registration payment
     const { data: approved } = await supabase
       .from('students')
       .select('*, classes(name, segmented_registration_fee)')
@@ -106,7 +99,6 @@ export default function BursarDashboard({ userProfile }) {
       .order('created_at', { ascending: false });
     setApprovedApps(approved || []);
 
-    // Settlement ledger — fetch full student details for complete receipt reprints
     const { data: txns } = await supabase
       .from('financial_transactions')
       .select('*, students(full_name, matricule, gender, date_of_birth, place_of_birth, parent_phone, classes(name))')
@@ -114,6 +106,18 @@ export default function BursarDashboard({ userProfile }) {
       .order('created_at', { ascending: false })
       .limit(100);
     setCompletedTxns(txns || []);
+  }
+
+  // --- Process the Queue ---
+  async function handleProcessQueue() {
+    if (printQueue.length === 0) return;
+    const targetReceipt = printQueue[0];
+    
+    // We send 'true' to keep the printing smooth and silent, but it is triggered by a tap.
+    await printThermalReceipt(targetReceipt, schoolConfig, true);
+    
+    // Remove the printed receipt from the queue
+    setPrintQueue(prev => prev.slice(1));
   }
 
   function calculateMandatedRegistrationFee(student) {
@@ -168,31 +172,27 @@ export default function BursarDashboard({ userProfile }) {
     if (studentError) return toast.error('Lifecycle update error.', { id: toastId });
 
     toast.success(
-      `${Number(amount).toLocaleString()} XAF recorded successfully for ${targetStudent.full_name}.`,
+      `${Number(amount).toLocaleString()} XAF recorded successfully.`,
       { id: toastId, duration: 4000 }
     );
 
-    // ── Build complete receipt data ──────────────────────────────────────────
     const receiptData = {
       id:             transaction.id,
       student_name:   targetStudent.full_name,
       matricule:      targetStudent.matricule,
       class_name:     targetStudent.classes?.name   || null,
-      gender:         targetStudent.gender           || null,
+      gender:         targetStudent.gender          || null,
       date_of_birth:  targetStudent.date_of_birth   || null,
       place_of_birth: targetStudent.place_of_birth  || null,
       parent_phone:   targetStudent.parent_phone    || null,
-      type:           feeType === 'REGISTRATION'
-                        ? 'Validation Inscription / Registration Fee'
-                        : 'Paiement Scolarité / Tuition Fee',
+      type:           feeType === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
       amount:         transaction.amount,
       payment_method: 'ESPÈCES / CASH',
       bursar_name:    userProfile.full_name,
       created_at:     transaction.created_at,
     };
 
-    printThermalReceipt(receiptData, schoolConfig);
-    // ────────────────────────────────────────────────────────────────────────
+    printThermalReceipt(receiptData, schoolConfig, false);
 
     if (isFallbackSearch) {
       setSearchedStudent(null);
@@ -219,7 +219,6 @@ export default function BursarDashboard({ userProfile }) {
     }
   }
 
-  // ── Build receipt data for ledger reprints ───────────────────────────────
   function buildReprintData(tx) {
     return {
       id:             tx.id,
@@ -230,9 +229,7 @@ export default function BursarDashboard({ userProfile }) {
       date_of_birth:  tx.students?.date_of_birth    || null,
       place_of_birth: tx.students?.place_of_birth   || null,
       parent_phone:   tx.students?.parent_phone     || null,
-      type:           tx.type === 'REGISTRATION'
-                        ? 'Validation Inscription / Registration Fee'
-                        : 'Paiement Scolarité / Tuition Fee',
+      type:           tx.type === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
       amount:         tx.amount,
       payment_method: (tx.payment_method || 'CASH').replace('_SIMULATED', '').replace(/_/g, ' '),
       bursar_name:    userProfile.full_name,
@@ -242,6 +239,25 @@ export default function BursarDashboard({ userProfile }) {
 
   return (
     <div className="p-4 md:p-8 max-w-6xl mx-auto space-y-6 md:space-y-10">
+
+      {/* NEW: THE REMOTE PAYMENT PRINT QUEUE BANNER */}
+      {printQueue.length > 0 && (
+        <div className="bg-emerald-600 text-white p-4 md:p-5 rounded-2xl shadow-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 border border-emerald-500 animate-pulse">
+          <div className="flex items-center gap-3">
+            <div className="bg-white/20 p-2 rounded-full"><BellRing size={24} /></div>
+            <div>
+              <p className="font-black text-lg">Parent MoMo Payment Received!</p>
+              <p className="text-sm font-medium text-emerald-100">Ready to print receipt for {printQueue[0].student_name}</p>
+            </div>
+          </div>
+          <button
+            onClick={handleProcessQueue}
+            className="w-full sm:w-auto bg-white text-emerald-700 px-6 py-3 rounded-xl font-black shadow-lg hover:bg-emerald-50 transition uppercase tracking-wider text-sm"
+          >
+            Tap to Print Receipt
+          </button>
+        </div>
+      )}
 
       {/* GLOBAL SEARCH UTILITY */}
       <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100">
@@ -277,12 +293,6 @@ export default function BursarDashboard({ userProfile }) {
                 <p className="text-xs md:text-sm text-slate-600 font-medium">
                   Class Group: {searchedStudent.classes?.name || 'Unassigned'}
                 </p>
-                {searchedStudent.date_of_birth && (
-                  <p className="text-xs text-slate-400 font-medium mt-0.5">
-                    DOB: {searchedStudent.date_of_birth}
-                    {searchedStudent.gender ? ` · ${searchedStudent.gender}` : ''}
-                  </p>
-                )}
               </div>
               <span className="text-[9px] md:text-[10px] font-black uppercase tracking-wider bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700">
                 Status: {searchedStudent.application_status}
@@ -524,7 +534,7 @@ export default function BursarDashboard({ userProfile }) {
                     </td>
                     <td className="p-3 md:p-5 text-center">
                       <button
-                        onClick={() => printThermalReceipt(buildReprintData(tx), schoolConfig)}
+                        onClick={() => printThermalReceipt(buildReprintData(tx), schoolConfig, false)}
                         className="bg-slate-200 text-slate-700 hover:bg-slate-300 px-3 py-1.5 rounded text-xs font-bold transition"
                       >
                         Reprint
