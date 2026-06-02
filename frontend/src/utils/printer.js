@@ -17,7 +17,8 @@ export const printThermalReceipt = async (transaction, schoolConfig) => {
   const refId      = transaction.id
     ? `TRK-${transaction.id.replace(/-/g, '').substring(0, 12).toUpperCase()}`
     : 'N/A';
-  const amount    = Number(transaction.amount || 0).toLocaleString('fr-FR');
+  // Use US locale to get commas, then replace commas with standard ASCII spaces
+  const amount = Number(transaction.amount || 0).toLocaleString('en-US').replace(/,/g, ' ');
   const payMethod = (transaction.payment_method || 'ESPECES')
     .replace('_SIMULATED', '')
     .replace(/_/g, ' ');

@@ -18,17 +18,60 @@ export default function BursarDashboard({ userProfile }) {
 
   const [activePaymentStudent, setActivePaymentStudent] = useState(null);
 
+  // ... inside BursarDashboard.jsx
+
   useEffect(() => {
     loadDashboardData();
 
+    // Setup the Realtime Listener
     const masterChannel = supabase
       .channel('bursar_realtime_ledger')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => loadDashboardData())
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'financial_transactions' }, () => loadDashboardData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => {
+          loadDashboardData();
+      })
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'financial_transactions' }, async (payload) => {
+          // 1. A new transaction occurred! Reload the UI.
+          loadDashboardData();
+
+          // 2. Check if this is a REMOTE payment (e.g., from a Parent's phone via MoMo)
+          const newTxn = payload.new;
+          
+          // We only want to auto-print if it's for THIS school, and it was NOT manually processed by the Bursar
+          // (Assuming remote MoMo payments don't have a processed_by ID, or have a specific payment_method string)
+          if (newTxn.school_id === userProfile.school_id && newTxn.payment_method.includes('MOMO')) {
+              
+              // We need to fetch the student's name for the receipt since the payload only gives us the student_id
+              const { data: studentInfo } = await supabase
+                  .from('students')
+                  .select('full_name, matricule, classes(name)')
+                  .eq('id', newTxn.student_id)
+                  .single();
+
+              if (studentInfo) {
+                  // Construct the receipt object
+                  const receiptData = {
+                      id: newTxn.id,
+                      student_name: studentInfo.full_name,
+                      matricule: studentInfo.matricule,
+                      class_name: studentInfo.classes?.name,
+                      type: newTxn.type === 'REGISTRATION' ? 'Registration Validation' : 'Tuition Allocation',
+                      amount: newTxn.amount,
+                      payment_method: newTxn.payment_method,
+                      bursar_name: 'Auto: ' + newTxn.payment_method // Indicate it was an automatic payment
+                  };
+
+                  // 3. Trigger the silent background print!
+                  toast.success(`Remote payment received! Auto-printing receipt for ${studentInfo.full_name}...`, { duration: 5000, icon: '🖨️' });
+                  
+                  // Pass schoolConfig and set silent = true
+                  printThermalReceipt(receiptData, schoolConfig, true);
+              }
+          }
+      })
       .subscribe();
 
     return () => supabase.removeChannel(masterChannel);
-  }, []);
+  }, [schoolConfig, userProfile]); // Ensure dependencies are accurate
 
   async function loadDashboardData() {
     // Fetch school config merged with school name for receipt header
