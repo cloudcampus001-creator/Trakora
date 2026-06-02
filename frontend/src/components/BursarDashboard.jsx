@@ -21,20 +21,19 @@ export default function BursarDashboard({ userProfile }) {
   // NEW: The Remote Print Queue State
   const [printQueue, setPrintQueue] = useState([]);
 
+  // 1. Initial Data Load
   useEffect(() => {
     loadDashboardData();
 
-    // Setup the Realtime Listener
+    // Setup the Realtime Ledger Listener
     const masterChannel = supabase
       .channel('bursar_realtime_ledger')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'students' }, () => {
           loadDashboardData();
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'financial_transactions' }, async (payload) => {
-          // 1. A new transaction occurred! Reload the UI.
           loadDashboardData();
 
-          // 2. Check if this is a REMOTE payment (e.g., from a Parent's phone via MoMo)
           const newTxn = payload.new;
           
           if (newTxn.school_id === userProfile.school_id && newTxn.payment_method.includes('MOMO')) {
@@ -46,7 +45,6 @@ export default function BursarDashboard({ userProfile }) {
                   .single();
 
               if (studentInfo) {
-                  // Construct the receipt object
                   const receiptData = {
                       id: newTxn.id,
                       student_name: studentInfo.full_name,
@@ -58,7 +56,6 @@ export default function BursarDashboard({ userProfile }) {
                       bursar_name: 'Paiement en ligne (MoMo)' 
                   };
 
-                  // 3. Push to the Print Queue so the Bursar can tap to print
                   setPrintQueue(prev => [...prev, receiptData]);
                   toast('Remote payment received! Ready to print.', { icon: '🔔', duration: 5000 });
               }
@@ -68,6 +65,34 @@ export default function BursarDashboard({ userProfile }) {
 
     return () => supabase.removeChannel(masterChannel);
   }, [schoolConfig, userProfile]); 
+
+  // 2. Printer Listener Effect
+  useEffect(() => {
+    const printerChannel = supabase
+      .channel('printing')
+      .on('postgres_changes', { 
+        event: 'INSERT', schema: 'public', table: 'print_jobs' 
+      }, (payload) => {
+        console.log("Printing content:", payload.new.content);
+        
+        // If the schoolConfig is loaded, trigger the printer utility
+        if (schoolConfig) {
+          // Note: This assumes payload.new.content is an object that matches your receipt structure.
+          // If content is just a string, you may need to parse it: JSON.parse(payload.new.content)
+          try {
+             const dataToPrint = typeof payload.new.content === 'string' ? JSON.parse(payload.new.content) : payload.new.content;
+             printThermalReceipt(dataToPrint, schoolConfig, false);
+             toast.success('Automatic print job triggered!');
+          } catch (e) {
+             console.error("Failed to parse print job", e);
+             toast.error('Print job received but format is invalid.');
+          }
+        }
+      })
+      .subscribe();
+
+    return () => supabase.removeChannel(printerChannel);
+  }, [schoolConfig]); // Dependency on schoolConfig ensures we have the printer settings loaded
 
   async function loadDashboardData() {
     const { data: configData, error: cfgError } = await supabase
@@ -113,10 +138,7 @@ export default function BursarDashboard({ userProfile }) {
     if (printQueue.length === 0) return;
     const targetReceipt = printQueue[0];
     
-    // We send 'true' to keep the printing smooth and silent, but it is triggered by a tap.
     await printThermalReceipt(targetReceipt, schoolConfig, true);
-    
-    // Remove the printed receipt from the queue
     setPrintQueue(prev => prev.slice(1));
   }
 
@@ -143,10 +165,10 @@ export default function BursarDashboard({ userProfile }) {
     const { data: transaction, error: txnError } = await supabase
       .from('financial_transactions')
       .insert([{
-        school_id:      userProfile.school_id,
-        student_id:     targetStudent.id,
-        amount:         Number(amount),
-        type:           feeType,
+        school_id:       userProfile.school_id,
+        student_id:      targetStudent.id,
+        amount:          Number(amount),
+        type:            feeType,
         payment_method: 'CASH',
         processed_by:   userProfile.id,
         status:         'COMPLETED',
@@ -177,19 +199,19 @@ export default function BursarDashboard({ userProfile }) {
     );
 
     const receiptData = {
-      id:             transaction.id,
-      student_name:   targetStudent.full_name,
-      matricule:      targetStudent.matricule,
-      class_name:     targetStudent.classes?.name   || null,
-      gender:         targetStudent.gender          || null,
-      date_of_birth:  targetStudent.date_of_birth   || null,
+      id:            transaction.id,
+      student_name:  targetStudent.full_name,
+      matricule:     targetStudent.matricule,
+      class_name:    targetStudent.classes?.name   || null,
+      gender:        targetStudent.gender          || null,
+      date_of_birth: targetStudent.date_of_birth   || null,
       place_of_birth: targetStudent.place_of_birth  || null,
-      parent_phone:   targetStudent.parent_phone    || null,
-      type:           feeType === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
-      amount:         transaction.amount,
+      parent_phone:  targetStudent.parent_phone    || null,
+      type:          feeType === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
+      amount:        transaction.amount,
       payment_method: 'ESPÈCES / CASH',
       bursar_name:    userProfile.full_name,
-      created_at:     transaction.created_at,
+      created_at:    transaction.created_at,
     };
 
     printThermalReceipt(receiptData, schoolConfig, false);
@@ -221,19 +243,19 @@ export default function BursarDashboard({ userProfile }) {
 
   function buildReprintData(tx) {
     return {
-      id:             tx.id,
-      student_name:   tx.students?.full_name        || 'N/A',
-      matricule:      tx.students?.matricule         || 'N/A',
-      class_name:     tx.students?.classes?.name    || null,
-      gender:         tx.students?.gender           || null,
-      date_of_birth:  tx.students?.date_of_birth    || null,
+      id:            tx.id,
+      student_name:  tx.students?.full_name        || 'N/A',
+      matricule:     tx.students?.matricule         || 'N/A',
+      class_name:    tx.students?.classes?.name    || null,
+      gender:        tx.students?.gender           || null,
+      date_of_birth: tx.students?.date_of_birth    || null,
       place_of_birth: tx.students?.place_of_birth   || null,
-      parent_phone:   tx.students?.parent_phone     || null,
-      type:           tx.type === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
-      amount:         tx.amount,
+      parent_phone:  tx.students?.parent_phone     || null,
+      type:          tx.type === 'REGISTRATION' ? 'Validation Inscription / Registration Fee' : 'Paiement Scolarité / Tuition Fee',
+      amount:        tx.amount,
       payment_method: (tx.payment_method || 'CASH').replace('_SIMULATED', '').replace(/_/g, ' '),
       bursar_name:    userProfile.full_name,
-      created_at:     tx.created_at,
+      created_at:    tx.created_at,
     };
   }
 
