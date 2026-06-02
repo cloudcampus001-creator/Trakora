@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { toast } from 'react-hot-toast';
-import { CheckCircle, Printer, ArrowLeft } from 'lucide-react'; // Make sure to install lucide-react
+import { CheckCircle, Printer, ArrowLeft } from 'lucide-react';
 
 export default function ParentPortal({ schoolSlug }) {
   const [school, setSchool] = useState(null);
   const [classes, setClasses] = useState([]);
   const [portalMode, setPortalMode] = useState('SELECTION');
-  const [isSuccess, setIsSuccess] = useState(false); // New state for receipt view
+  const [isSuccess, setIsSuccess] = useState(false); 
   const [lastTransaction, setLastTransaction] = useState(null);
 
   const [currentAppId, setCurrentAppId] = useState(localStorage.getItem('edu_app_id') || null);
@@ -66,7 +66,54 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // --- Printing Logic ---
+  // --- Submission & Data Handlers ---
+
+  async function handleSubmitRegistration(e) {
+    e.preventDefault();
+    const toastId = toast.loading('Submitting application...');
+    const { data, error } = await supabase.from('students').insert([{
+      school_id: school.id,
+      full_name: fullName,
+      class_id: classId,
+      gender,
+      dob,
+      pob,
+      parent_phone: phone,
+      application_status: 'PENDING_REVIEW'
+    }]).select().single();
+
+    if (error) {
+      toast.error('Submission failed.');
+    } else {
+      localStorage.setItem('edu_app_id', data.id);
+      setCurrentAppId(data.id);
+      toast.success('Application submitted!');
+    }
+    toast.dismiss(toastId);
+  }
+
+  async function handleRecoverMatricule(e) {
+    e.preventDefault();
+    const { data, error } = await supabase.from('students').select('*, classes(*)').eq('parent_phone', recoveryPhone).eq('school_id', school.id);
+    if (error || !data || data.length === 0) {
+      toast.error("No students found with this phone number.");
+    } else {
+      setRecoveredStudents(data);
+    }
+  }
+
+  async function handleFindStudentForTuition(e) {
+    e.preventDefault();
+    const { data, error } = await supabase.from('students').select('*, classes(*)').eq('matricule', searchMatricule).eq('school_id', school.id).single();
+    if (error || !data) {
+      toast.error("Student not found.");
+    } else {
+      setFoundStudent(data);
+    }
+  }
+
+  // --- Printing & Payment Logic ---
+
   async function handlePrintReceipt(txData) {
     const toastId = toast.loading('Sending to Bursar printer...');
     const { error } = await supabase.from('print_jobs').insert([{
@@ -108,12 +155,10 @@ export default function ParentPortal({ schoolSlug }) {
     }
   }
 
-  // Reset function for multi-child
   function resetPortal() {
     setIsSuccess(false);
     setFoundStudent(null);
     setPortalMode('SELECTION');
-    // Keep app ID if you want to keep them logged in, or clear if you want full restart
   }
 
   if (isSuccess) return (
@@ -130,8 +175,6 @@ export default function ParentPortal({ schoolSlug }) {
       </div>
     </div>
   );
-
-  // ... (Keep the rest of your existing return JSX here for SELECTION/REGISTER/TUITION modes)
 
   if (!school) return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4 space-y-4 bg-slate-100">
